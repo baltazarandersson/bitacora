@@ -1,0 +1,66 @@
+name: Release
+
+# Push a tag like v1.0.0 to build, attach the files to a GitHub release and publish to PyPI.
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  dist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install build
+      - run: python -m build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/*
+
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install . pyinstaller
+      - run: >
+          pyinstaller --onefile --name bitacora --collect-all textual --collect-all rich
+          --copy-metadata textual scripts/entry.py
+      - run: dist/bitacora.exe --version
+      - uses: actions/upload-artifact@v7
+        with:
+          name: exe
+          path: dist/bitacora.exe
+
+  release:
+    needs: [dist, windows-exe]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: out/*
+          generate_release_notes: true
+
+  pypi:
+    needs: [dist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

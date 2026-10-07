@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bitacora"
+dynamic = ["version"]
+description = "Live dashboard for coding agents (Codex, Claude Code) working in the background."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Baltazar Andersson" }]
+keywords = ["codex", "claude-code", "agents", "tui", "monitor", "textual"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: System :: Monitoring",
+]
+dependencies = ["textual>=1.0", "psutil>=5.9"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
+
+[project.scripts]
+bitacora = "bitacora.cli:main"
+
+[project.urls]
+Repository = "https://github.com/baltazarandersson/bitacora"
+Issues = "https://github.com/baltazarandersson/bitacora/issues"
+Changelog = "https://github.com/baltazarandersson/bitacora/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "bitacora/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+include = ["bitacora", "tests", "README.md", "README.es.md", "CHANGELOG.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E731"]
