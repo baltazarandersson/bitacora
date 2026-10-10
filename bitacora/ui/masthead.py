@@ -124,7 +124,6 @@ class Beacon(Widget):
     """The static brand and status line at the top of the monitor."""
 
     DEFAULT_CSS = "Beacon { height: 1; padding: 0 1; }"
-
     class Clicked(Message):
         def __init__(self, action: str | None = None):
             super().__init__()
@@ -240,10 +239,7 @@ class BeaconRule(Widget):
         variables = self.app.get_css_variables()
         beam = variables["warning" if self.asking else "accent"]
         span = width + 2 * self.GLOW
-        # Use both the wall-clock phase and the widget's render frame so manual frame adjustments and the live
-        # animation both change the beam position without breaking the full-pass timing tests.
-        phase = (time.monotonic() - self.t0) / self.PASS + getattr(self, "frame", 0) / max(1.0, default_scene_fps())
-        pos = (phase % 1) * span - self.GLOW
+        pos = ((time.monotonic() - self.t0) / self.PASS) % 1 * span - self.GLOW
         segments: list[Segment] = []
         run, current = "", None
         for x in range(width):
@@ -257,4 +253,3 @@ class BeaconRule(Widget):
         if run:
             segments.append(Segment(run, current))
         return Strip(segments).crop(0, width)
-

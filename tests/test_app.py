@@ -955,8 +955,9 @@ async def test_footer_keeps_the_desktop_groups_and_no_sort_keys(demo_env):
         assert not any(segment.style and segment.style.underline for segment in footer)
 
 
-async def test_header_uses_one_rule_and_backgrounded_question_chips(demo_env):
+async def test_header_uses_one_rule_and_backgrounded_question_chips(demo_env, monkeypatch):
     from bitacora.i18n import t
+    from bitacora.ui import masthead
     from bitacora.ui.masthead import BeaconRule
     from bitacora.util import first_line
 
@@ -971,10 +972,13 @@ async def test_header_uses_one_rule_and_backgrounded_question_chips(demo_env):
         line = rule.render_line(0)
         assert line.text == "─" * rule.size.width
         assert all(segment.style and not segment.style.underline for segment in line._segments)
-        rule.frame = 2
+        # The beam moves with time: render it at two clock readings a third of a pass apart.
+        clock = [rule.t0 + 0.2]
+        monkeypatch.setattr(masthead, "time", type("Clock", (), {"monotonic": staticmethod(lambda: clock[0])}))
         before = [str(segment.style.color) for segment in rule.render_line(0)._segments]
-        rule.frame = 60
+        clock[0] += rule.PASS / 3
         after = [str(segment.style.color) for segment in rule.render_line(0)._segments]
+        monkeypatch.undo()
         assert before != after
         screen = screen_lines(app)
         assert sum(bool(value.strip()) and set(value.strip()) == {"─"} for value in screen) == 1
