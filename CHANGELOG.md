@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.1 (2026-10-10)
+
+### Documentation
+
+- Rewrite the README's Why section around the questions background runs raise: audit of what an agent did, context window, waiting for input, stuck runs, quota limits and safe Stop.
+- Add a looping demo GIF to the README header in English and Spanish, and show the desktop and terminal screenshots in the Use section.
+- Move Install above the feature list and remove duplicated sorting and privacy details.
+
 ## 1.1.0 (2026-10-10)
 
 ### Desktop app

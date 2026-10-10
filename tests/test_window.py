@@ -237,7 +237,9 @@ def test_cli_information_flags_do_not_need_gui(monkeypatch, capsys):
     monkeypatch.setattr(builtins, "__import__", without_gui)
     with pytest.raises(SystemExit) as result:
         main(["--version"])
-    assert result.value.code == 0 and "1.1.0" in capsys.readouterr().out
+    from bitacora import __version__
+
+    assert result.value.code == 0 and __version__ in capsys.readouterr().out
 
 
 def test_profile_cleanup_retries_transient_webview_lock(monkeypatch):

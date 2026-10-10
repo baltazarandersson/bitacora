@@ -6,26 +6,20 @@ Un monitor local para agentes de código. Sigue corridas en segundo plano y sesi
 
 Bitácora tiene una app de escritorio para Windows y una interfaz de terminal para Windows, Linux y macOS. Ambas comparten el lector de sesiones y mantienen actividad, mensajes, archivos, logs, resultados, cuotas y configuración.
 
-![App de escritorio de Windows con sesiones generadas de la demo](https://raw.githubusercontent.com/baltazarandersson/bitacora/main/docs/desktop-es.jpg)
-
-![Interfaz de terminal con sesiones generadas de la demo](https://raw.githubusercontent.com/baltazarandersson/bitacora/main/docs/screenshot-es.svg)
+![App de escritorio de Bitácora con sesiones de la demo en loop: corridas en vivo, salida de comandos y cambios en archivos](https://raw.githubusercontent.com/baltazarandersson/bitacora/main/docs/readme-es.gif)
 
 ## Por qué
 
-Cuando le delegas trabajo a agentes en segundo plano (un `codex exec` en otra terminal, un `claude -p` desde un script, un orquestador que lanza cinco corridas a la vez), cada uno va dejando su progreso en un archivo que nunca abres. Te enteras de cómo fue cuando termina, o cuando te acuerdas de mirar.
+Cuando le delegas trabajo a agentes en segundo plano, aparecen preguntas que los agentes no te van a responder:
 
-Bitácora lee esos archivos mientras crecen. Empareja cada proceso con su sesión y muestra qué está haciendo cada corrida, qué archivos tocó, el tamaño del prompt de la llamada más reciente al modelo y si está esperando algo de ti. No lanza agentes ni busca en tu historial: es el panel que dejas abierto mientras tus agentes trabajan.
+- **¿Hizo lo que dice?** Una corrida termina con "tests pasan". Bitácora muestra los comandos que ejecutó con su código de salida y los archivos que editó, así auditas la traza y no el resumen.
+- **¿Sigue dentro de su ventana de contexto?** Las corridas largas se compactan o se cortan antes de fallar. Cada corrida muestra el tamaño de su última llamada al modelo frente a su ventana.
+- **¿Me está esperando?** Una corrida que pregunta a las 2 a. m. queda parada hasta que la notes. Las preguntas suben arriba y disparan un aviso.
+- **¿Cuál de las cinco se atascó?** Un orquestador que lanza corridas en paralelo te deja cinco procesos y cinco prompts. Bitácora empareja cada proceso con su sesión y marca las que dejaron de avanzar.
+- **¿Llegó a un límite?** Ves el estado de la sesión y la ventana de cuota, no un archivo de resultado truncado.
+- **¿Es seguro detenerla?** Detener verifica que el proceso siga siendo el de esa sesión, así un PID reutilizado nunca mata otra cosa.
 
-## Qué muestra
-
-- Cada sesión con su estado: pregunta, iniciando, en curso, en silencio, te toca, terminada, fallida, límite alcanzado, detenida o desconocida.
-- La actividad de cada sesión: comandos con su código de salida, archivos editados con líneas agregadas y quitadas, mensajes, y cuánto pensó el agente antes de cada paso.
-- Pestañas para los mensajes, los archivos tocados, el log de la corrida, su archivo de resultado y todos los datos de la sesión.
-- El contexto de la llamada más reciente al modelo, como porcentaje cuando se conoce la ventana y, si no, como cantidad de tokens. Total es acumulativo: Claude Code cuenta los tokens procesados de prompt y salida, incluido el uso de caché; Codex muestra el total informado por el agente. Las cuotas muestran el porcentaje de uso o el estado restablecido, y los datos desconocidos siguen como desconocidos.
-- Un aviso cuando una corrida termina, se corta o te pregunta algo.
-- Acciones sobre la corrida seleccionada: detenerla (te pide confirmación), abrir su resultado o su log, copiar el comando que la retoma.
-
-Un turno interactivo completado muestra te toca incluso después de cerrar su proceso; un turno sin terminar y sin actividad reciente muestra en silencio. Las preguntas siguen pendientes mientras haya un proceso en ejecución o durante seis horas desde la última actividad de la transcripción. Monokai es el tema predeterminado.
+Bitácora lee los archivos que los agentes ya escriben. No lanza agentes ni busca en tu historial: es el panel que dejas abierto mientras tus agentes trabajan.
 
 ## Instalación
 
@@ -35,15 +29,26 @@ uvx bitacora
 
 Si prefieres dejarlo instalado: `pipx install bitacora` o `uv tool install bitacora`. Necesitas Python 3.11 o más nuevo.
 
-El build de Windows de 1.1 distribuye un único ejecutable público, `bitacora.exe`, que abre la app de escritorio sin Python ni consola. Cuando se publique 1.1, podrás descargarlo desde la [página de releases](https://github.com/baltazarandersson/bitacora/releases/latest). Requiere Microsoft Edge WebView2 Runtime. No está firmado, así que SmartScreen podría avisarte la primera vez.
-
-Si instalas con Python, agrega `pip install "bitacora[window]"` y ejecuta `bitacora --window`. El escritorio de 1.1 apunta a Windows; la terminal sigue disponible en los tres sistemas. La CLI se usa desde el paquete Python o el repositorio y no requiere otro EXE.
-
 Para probarlo sin tener ningún agente instalado:
 
 ```bash
 uvx bitacora --demo
 ```
+
+El build de Windows de 1.1 distribuye un único ejecutable público, `bitacora.exe`, que abre la app de escritorio sin Python ni consola. Puedes descargarlo desde la [última página de releases](https://github.com/baltazarandersson/bitacora/releases/latest). Requiere Microsoft Edge WebView2 Runtime. No está firmado, así que SmartScreen podría avisarte la primera vez.
+
+Si instalas con Python, agrega `pip install "bitacora[window]"` y ejecuta `bitacora --window`. El escritorio de 1.1 apunta a Windows; la terminal sigue disponible en los tres sistemas.
+
+## Qué muestra
+
+- Cada sesión con su estado: pregunta, iniciando, en curso, en silencio, te toca, terminada, fallida, límite alcanzado, detenida o desconocida.
+- La actividad de cada sesión: comandos con su código de salida, archivos editados con líneas agregadas y quitadas, mensajes, y cuánto pensó el agente antes de cada paso.
+- Pestañas para los mensajes, los archivos tocados, el log de la corrida, su archivo de resultado y todos los datos de la sesión.
+- El contexto de la llamada más reciente al modelo, como porcentaje cuando se conoce la ventana y, si no, como cantidad de tokens. Total es acumulativo: Claude Code cuenta los tokens procesados de prompt y salida, incluido el uso de caché; Codex muestra el total informado por el agente. Las cuotas muestran el porcentaje de uso o el estado restablecido, y los datos desconocidos siguen como desconocidos.
+- Un aviso cuando una corrida termina, se corta o te pregunta algo.
+- Acciones sobre la corrida seleccionada: detenerla (te pide confirmación), abrir su resultado o su log (los formatos de texto admitidos se abren en la aplicación del sistema), copiar el comando que la retoma.
+
+Un turno interactivo completado muestra te toca incluso después de cerrar su proceso; un turno sin terminar y sin actividad reciente muestra en silencio. Las preguntas siguen pendientes mientras haya un proceso en ejecución o durante seis horas desde la última actividad de la transcripción. Monokai es el tema predeterminado.
 
 ## Uso
 
@@ -57,13 +62,17 @@ bitacora --window             # app de escritorio Windows (dependencias opcional
 bitacora --window --demo      # app de escritorio con sesiones generadas
 ```
 
+![Interfaz de terminal con sesiones generadas de la demo](https://raw.githubusercontent.com/baltazarandersson/bitacora/main/docs/screenshot-es.svg)
+
 La primera vez, Bitácora abre su pantalla de inicio: un faro que barre con su luz un mar de código que cae, bajo un cielo que sigue tu hora local, con una fase lunar aproximada de noche y el sol cruzando de día. Cada vista aparece con la cantidad de sesiones que mostraría con los datos de tu propia máquina, así sabes qué estás eligiendo antes de elegirlo. Puedes volver a esa pantalla cuando quieras con `s` para cambiar la vista, el idioma, la ventana de historial, los avisos o el tema. La cabecera se adapta al ancho disponible. En terminales muy bajas, la línea de cuota se oculta automáticamente; su información completa permanece en Detalles. La escena de inicio se reduce antes de que los ajustes necesiten desplazarse.
 
 ![Pantalla de inicio con conteos sintéticos de la demo, ajustes y un faro sobre código que cae](https://raw.githubusercontent.com/baltazarandersson/bitacora/main/docs/home-es.svg)
 
+![App de escritorio de Windows con sesiones generadas de la demo](https://raw.githubusercontent.com/baltazarandersson/bitacora/main/docs/desktop-es.jpg)
+
 En la app de escritorio, las preguntas tienen un acceso directo sobre la lista de sesiones. Selecciona una sesión para usar sus botones Resultado, Log, Copiar comando para reanudar y Detener, o recorrer las seis pestañas. Detener permanece visible; las acciones secundarias pasan al menú `⋯` cuando falta espacio. La ventana mínima es de 800×560 y el panel de la sesión seleccionada se compacta para conservar la lista en tamaños pequeños. Ayuda muestra los atajos. La configuración también permite cambiar el tamaño del texto. `r` y `F5` actualizan los datos del escritorio; `Ctrl+R` restablece el orden. Los encabezados son botones accesibles con teclado que alternan entre orden ascendente, descendente y predeterminado, y anuncian la dirección. Estado y Nombre permanecen fijos al desplazar la tabla horizontalmente, y las etiquetas completas siguen disponibles en ayudas emergentes. El faro usa la misma escena de la terminal, dibujada directamente en la ventana. Copiar comando para reanudar copia un comando para una terminal; no abre ni responde al agente automáticamente.
 
-Ambas interfaces usan el mismo orden predeterminado: primero las preguntas pendientes, luego las sesiones en vivo y después las más recientes. Ambas tablas conservan sus catorce columnas, desde Estado, Agente y Nombre hasta contexto, Total, conteos de comandos y archivos, Modo y PID, con desplazamiento horizontal. Detalles conserva toda la información técnica, incluido si el estado de una sesión en curso se apoya en un proceso o en la transcripción. Haz clic en un encabezado para alternar entre orden ascendente, descendente y predeterminado; `<` y `>` recorren las columnas y `Ctrl+R` restablece el orden. La paleta `Ctrl+P` de la terminal también ofrece comandos de orden. `m` alterna Texto plano en Mensajes y Resultado en ambas interfaces.
+Ambas interfaces ordenan primero por preguntas, luego por sesiones en vivo y después por las más recientes. Ambas tablas conservan sus catorce columnas con desplazamiento horizontal. Detalles conserva toda la información técnica, incluido si el estado de una sesión en curso viene de un proceso o de la transcripción. `m` alterna Texto plano en Mensajes y Resultado en ambas interfaces.
 
 | Tecla | Acción |
 | --- | --- |
@@ -128,8 +137,7 @@ Ambas interfaces leen las sesiones en un proceso aparte. La app de escritorio us
 
 ## Privacidad
 
-Todo queda en tu máquina. Bitácora no hace pedidos a servicios externos. La interfaz de escritorio y sus recursos se cargan localmente, sin servidor de aplicación HTTP ni WebSocket. Nunca escribe en los archivos de los agentes. Detener un agente requiere confirmación y verifica que la identidad del proceso siga coincidiendo. Sus archivos guardan tus preferencias, nombres de sesiones, rutas y líneas de comandos observadas; `bitacora --paths` te muestra dónde. Las acciones Resultado y Log abren formatos de texto admitidos en la aplicación del sistema; los demás contenidos siguen disponibles como texto dentro del panel.
-
+Todo queda en tu máquina. Bitácora no hace pedidos a servicios externos. La interfaz de escritorio y sus recursos se cargan localmente, sin servidor de aplicación HTTP ni WebSocket. Nunca escribe en los archivos de los agentes. Detener un agente requiere confirmación y verifica que la identidad del proceso siga coincidiendo. Sus archivos guardan tus preferencias, nombres de sesiones, rutas y líneas de comandos observadas; `bitacora --paths` te muestra dónde.
 ## Límites
 
 - Ninguno de los dos formatos está documentado, y los dos cambian entre versiones. Esta versión se probó con Codex CLI 0.161 y Claude Code 2.1.

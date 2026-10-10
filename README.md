@@ -6,26 +6,20 @@ A local monitor for coding agents. Follow background runs and interactive sessio
 
 Bitácora has a Windows desktop app and a terminal interface for Windows, Linux and macOS. Both use the same session reader and keep the same activity, messages, files, logs, results, quotas and preferences.
 
-![Windows desktop app showing generated demo sessions](https://raw.githubusercontent.com/baltazarandersson/bitacora/main/docs/desktop-en.jpg)
-
-![Terminal interface showing generated demo sessions](https://raw.githubusercontent.com/baltazarandersson/bitacora/main/docs/screenshot-en.svg)
+![Bitácora desktop app with generated demo sessions, looping: live runs, command output and file changes](https://raw.githubusercontent.com/baltazarandersson/bitacora/main/docs/readme-en.gif)
 
 ## Why
 
-When you hand work to agents in the background (a `codex exec` in another terminal, a `claude -p` from a script, an orchestrator that launches five runs at once), each one writes its progress to a file you never open. You find out how it went when it ends, or when you remember to look.
+Handing work to agents in the background raises questions the agents will not answer for you:
 
-Bitácora reads those files while they grow. It pairs every agent process with its session and shows what each run is doing, which files it touched, the prompt size of its latest model call and whether it is waiting for you. It is not a launcher and not a history search tool. It is the panel you keep open while your agents work.
+- **Did it do what it says?** A run ends with "tests pass". Bitácora shows the commands it ran with their exit codes and the files it edited, so you audit the trace, not the summary.
+- **Is it still inside its context window?** Long runs get compacted or cut off before they fail. Each run shows the size of its latest model call against its window.
+- **Is it waiting for me?** A run that asks a question at 2 a.m. sits idle until you notice. Questions sort to the top and trigger a notification.
+- **Which of the five is stuck?** An orchestrator that launches parallel runs leaves you with five processes and five prompts. Bitácora pairs each process with its session and marks the ones that went quiet.
+- **Did it hit a limit?** You see the session's status and quota window, not a truncated result file.
+- **Is it safe to stop?** Stop checks that the process is still the one the session belongs to, so a reused PID never kills something else.
 
-## What it shows
-
-- Every session with its status: question, starting, running, quiet, your turn, done, failed, limit reached, stopped or unknown.
-- An activity feed per session: commands with their exit codes, file edits with lines added and removed, messages, and how long the agent thought before each step.
-- Tabs for messages, touched files, the run's log, its result file and the full session details.
-- Context for the latest model call, as a percentage when the model window is known and otherwise as a token count. Total is cumulative: Claude Code counts processed prompt and output tokens, including cache use; Codex shows its reported total. Quota windows show their used percentage or reset state, and unknown values stay unknown.
-- A notification when a run finishes, stops or asks you something.
-- Actions on the selected run: stop it (it asks first), open its result or log, copy the command that resumes it.
-
-A completed interactive turn reads your turn even after its process closes; an unfinished turn without recent activity reads quiet. Questions remain pending while a process runs or for six hours after the last transcript activity. Monokai is the default theme.
+Bitácora reads the files the agents already write. It is not a launcher and not a history search tool. It is the panel you keep open while your agents work.
 
 ## Install
 
@@ -35,15 +29,26 @@ uvx bitacora
 
 Or install it for good with `pipx install bitacora` or `uv tool install bitacora`. You need Python 3.11 or newer.
 
-The 1.1 Windows build ships one public executable, `bitacora.exe`, which opens the desktop app without Python or a console. Once 1.1 is published, download it from the [release page](https://github.com/baltazarandersson/bitacora/releases/latest). It requires Microsoft Edge WebView2 Runtime. It is not code-signed, so SmartScreen may warn you the first time.
-
-From a Python install, add `pip install "bitacora[window]"` and run `bitacora --window`. Desktop support in 1.1 targets Windows; the terminal interface remains available on all three systems. The CLI is provided by the Python package or repository, rather than a second Windows executable.
-
 To try it without any agent installed:
 
 ```bash
 uvx bitacora --demo
 ```
+
+The 1.1 Windows build ships one public executable, `bitacora.exe`, which opens the desktop app without Python or a console. Download it from the [latest release page](https://github.com/baltazarandersson/bitacora/releases/latest). It requires Microsoft Edge WebView2 Runtime. It is not code-signed, so SmartScreen may warn you the first time.
+
+From a Python install, add `pip install "bitacora[window]"` and run `bitacora --window`. Desktop support in 1.1 targets Windows; the terminal interface remains available on all three systems.
+
+## What it shows
+
+- Every session with its status: question, starting, running, quiet, your turn, done, failed, limit reached, stopped or unknown.
+- An activity feed per session: commands with their exit codes, file edits with lines added and removed, messages, and how long the agent thought before each step.
+- Tabs for messages, touched files, the run's log, its result file and the full session details.
+- Context for the latest model call, as a percentage when the model window is known and otherwise as a token count. Total is cumulative: Claude Code counts processed prompt and output tokens, including cache use; Codex shows its reported total. Quota windows show their used percentage or reset state, and unknown values stay unknown.
+- A notification when a run finishes, stops or asks you something.
+- Actions on the selected run: stop it (it asks first), open its result or log (supported text formats open in your system application), copy the command that resumes it.
+
+A completed interactive turn reads your turn even after its process closes; an unfinished turn without recent activity reads quiet. Questions remain pending while a process runs or for six hours after the last transcript activity. Monokai is the default theme.
 
 ## Use
 
@@ -57,13 +62,17 @@ bitacora --window             # Windows desktop app (optional dependencies)
 bitacora --window --demo      # desktop app with generated sample sessions
 ```
 
+![Terminal interface showing generated demo sessions](https://raw.githubusercontent.com/baltazarandersson/bitacora/main/docs/screenshot-en.svg)
+
 The first time you open it, Bitácora shows its home screen: a lighthouse sweeping its beam over a sea of falling code, under a sky that follows your local time, with an approximate lunar phase at night and the sun crossing during the day. Each view there comes with the number of sessions it would show from your own machine, so you can tell at a glance what you are choosing. You can come back to that screen anytime with `s` to change the view, language, history window, notifications or theme. The header adapts to the available width. Very short terminals hide the quota line automatically; its full details remain in Details. The setup scene shrinks before the settings need to scroll.
 
 ![Home screen with synthetic demo counts, settings, and a lighthouse over falling code](https://raw.githubusercontent.com/baltazarandersson/bitacora/main/docs/home-en.svg)
 
+![Windows desktop app showing generated demo sessions](https://raw.githubusercontent.com/baltazarandersson/bitacora/main/docs/desktop-en.jpg)
+
 In the desktop app, questions have a direct shortcut above the session list. Select a session to use its Result, Log, Copy resume command and Stop buttons, or switch between the six detail tabs. Stop remains visible; secondary actions move into the `⋯` menu when space is short. The minimum window is 800×560, and a compact selected-session panel preserves the list at small sizes. Help lists the shortcuts. Settings also include text size. `r` and `F5` refresh desktop data; `Ctrl+R` resets sorting. The table headings are keyboard-focusable buttons that cycle ascending, descending and default order, with the direction announced to assistive technology. Status and Name stay pinned during horizontal scrolling, and full labels remain available in tooltips. The lighthouse uses the same scene as the terminal interface, rendered directly in the window. Copy resume command copies a command for a terminal; it does not automatically reopen or answer the agent.
 
-Both interfaces use a question-first default order: pending questions, then live sessions, then newest starts. Both tables retain all fourteen columns, from Status, Agent and Name through context, Total, command/file counts, Mode and PID, with horizontal scrolling. Details keeps the full technical inspection, including whether a running status is supported by a process or transcript. Click a heading to cycle ascending, descending and default order; `<` and `>` step through columns and `Ctrl+R` resets sorting. The terminal's `Ctrl+P` palette also offers sorting commands. `m` toggles Plain text in Messages and Result in both interfaces.
+Both interfaces sort by question first, then live sessions, then newest starts. Both tables keep all fourteen columns with horizontal scrolling. Details keeps the full technical inspection, including whether a running status comes from a process or a transcript. `m` toggles Plain text in Messages and Result in both interfaces.
 
 | Key | Action |
 | --- | --- |
@@ -128,8 +137,7 @@ Both interfaces read sessions in a separate process. The desktop app uses packag
 
 ## Privacy
 
-Everything stays on your machine. Bitácora itself makes no requests to external services. The desktop interface and its assets are embedded locally, without an HTTP or WebSocket application server. It never writes to the agents' files. Stopping an agent requires confirmation and checks that the process identity still matches. Its own files hold your preferences, session labels, file paths and observed command lines; `bitacora --paths` shows where. Result and log actions open supported text-document formats in your system application; other content remains available as text inside the panel.
-
+Everything stays on your machine. Bitácora itself makes no requests to external services. The desktop interface and its assets are embedded locally, without an HTTP or WebSocket application server. It never writes to the agents' files. Stopping an agent requires confirmation and checks that the process identity still matches. Its own files hold your preferences, session labels, file paths and observed command lines; `bitacora --paths` shows where.
 ## Limits
 
 - Neither format is documented, and both change between versions. This release was tested with Codex CLI 0.161 and Claude Code 2.1.
