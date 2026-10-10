@@ -8,6 +8,7 @@ from rich.text import Text
 
 from bitacora.i18n import t
 from bitacora.model import Event, Run, Session
+from bitacora.themes import TEXT_CONTRAST, contrast, mix
 from bitacora.util import first_line, fmt_ago, fmt_dur, hhmm
 
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -15,21 +16,22 @@ CMD_ICON = {"read": ("▤", "ev_read"), "search": ("⌕", "ev_search"), "list_fi
 HIDDEN_TOOLS = {"wait", "write_stdin"}  # internal polling in Codex code mode
 
 
-def mix(a: str, b: str, k: float) -> str:
-    """Blend two #rrggbb colors; k=0 gives a, k=1 gives b."""
-    k = max(0.0, min(1.0, k))
-    ra, ga, ba = int(a[1:3], 16), int(a[3:5], 16), int(a[5:7], 16)
-    rb, gb, bb = int(b[1:3], 16), int(b[3:5], 16), int(b[5:7], 16)
-    return f"#{round(ra + (rb - ra) * k):02x}{round(ga + (gb - ga) * k):02x}{round(ba + (bb - ba) * k):02x}"
-
-
-# Colors follow the active Textual theme; apply_theme() refreshes them. Defaults match tokyo-night.
-THEME_VARS = {"background": "#1a1b26", "foreground": "#a9b1d6", "success": "#9ece6a", "error": "#f6768e",
-              "warning": "#dfaf68", "primary": "#bb9af7", "secondary": "#7aa2f7", "accent": "#fe9e64"}
+# Colors follow the active Textual theme; apply_theme() refreshes them. Defaults match the default theme, monokai.
+THEME_VARS = {"background": "#272822", "foreground": "#d6d6d6", "success": "#a5e22e", "error": "#f82672",
+              "warning": "#fc971f", "primary": "#ae81ff", "secondary": "#f82672", "accent": "#66d9ef"}
 DARK = True
 BG = FG = DIM = GREEN = RED = YELLOW = CYAN = BLUE = PURPLE = VIOLET = ""
 STATUS_STYLE: dict[str, str] = {}
 AGENT_STYLE: dict[str, str] = {}
+
+
+def readable(c: str, bg: str, fg: str) -> str:
+    """The color itself if it reads on the background; otherwise pulled toward the text color until it does."""
+    for k in range(21):
+        cand = mix(c, fg, k / 20)
+        if contrast(cand, bg) >= TEXT_CONTRAST:
+            return cand
+    return fg
 
 
 def apply_theme(variables: dict[str, str] | None = None) -> None:
@@ -40,13 +42,19 @@ def apply_theme(variables: dict[str, str] | None = None) -> None:
             v[k] = val.lower()
     BG, FG = v["background"], v["foreground"]
     DARK = sum(int(BG[i:i + 2], 16) for i in (1, 3, 5)) < 384
-    DIM = mix(FG, BG, 0.42)
-    GREEN, RED, YELLOW = v["success"], v["error"], v["warning"]
-    CYAN, PURPLE = v["secondary"], v["primary"]
-    BLUE = mix(v["secondary"], FG, 0.35)
-    VIOLET = mix(v["primary"], FG, 0.3)
-    STATUS_STYLE = {"ask": f"bold {YELLOW}", "starting": CYAN, "running": f"bold {GREEN}", "idle": BLUE,
-                    "active": GREEN, "done": GREEN, "aborted": RED, "interrupted": RED, "unknown": DIM}
+    # Every color used for text must reach WCAG AA on the background. The dim tone was 3.6:1 in the default
+    # theme, and several status colors were under 2:1 on light themes.
+    DIM = readable(mix(FG, BG, 0.42), BG, FG)
+    GREEN, RED, YELLOW = (readable(v[k], BG, FG) for k in ("success", "error", "warning"))
+    CYAN, PURPLE = (readable(v[k], BG, FG) for k in ("secondary", "primary"))
+    BLUE = readable(mix(v["secondary"], FG, 0.35), BG, FG)
+    VIOLET = readable(mix(v["primary"], FG, 0.3), BG, FG)
+    limited = readable(mix(v["warning"], v["error"], 0.48), BG, FG)
+    stopped = readable(mix(v["error"], v["foreground"], 0.35), BG, FG)
+    quiet = readable(mix(v["secondary"], BG, 0.35), BG, FG)
+    STATUS_STYLE = {"asking": f"bold {YELLOW}", "starting": CYAN, "running": f"bold {GREEN}",
+                    "your_turn": BLUE, "done": GREEN, "failed": RED, "limited": limited, "stopped": stopped,
+                    "quiet": quiet, "unknown": DIM}
     AGENT_STYLE = {"codex": CYAN, "claude": v["accent"]}
 
 
@@ -57,10 +65,50 @@ def status_text(run: Run) -> Text:
     return Text(t(f"st_{run.status}"), style=STATUS_STYLE.get(run.status, DIM))
 
 
+def _agent_parts(run: Run) -> tuple[str, str, str]:
+    provider = str(run.provider).lower().replace("_", "-")
+    if provider in ("claude", "claude-code"):
+        provider_key = "claude"
+        style = AGENT_STYLE.get("claude", "")
+    elif provider == "codex":
+        provider_key = "codex"
+        style = AGENT_STYLE.get("codex", "")
+    else:
+        provider_key = "other"
+        style = AGENT_STYLE.get(run.provider, "")
+    session = run.session
+    kind = getattr(session, "origin_kind", getattr(run, "origin_kind", "other"))
+    if kind == "other" and session:
+        if provider in ("claude", "claude-code"):
+            from bitacora.providers.claude import origin_kind_for_raw
+            kind = origin_kind_for_raw(getattr(session, "origin", None))
+        elif provider == "codex":
+            from bitacora.providers.codex import origin_kind_for_raw
+            kind = origin_kind_for_raw(getattr(session, "origin", None))
+    kind = kind if kind in {"terminal", "background", "desktop", "ide", "subagent", "other"} else "other"
+    return provider_key, kind, style
+
+
 def agent_text(run: Run) -> Text:
-    tx = Text(run.provider, style=AGENT_STYLE.get(run.provider, ""))
-    if run.origin not in ("?", ""):
-        tx.append(f" {run.origin}", style=DIM)
+    """The full provider and origin label used in the hero and Details."""
+    provider_key, kind, style = _agent_parts(run)
+    provider_label = t(f"provider_{provider_key}") if provider_key in ("claude", "codex") else str(run.provider)
+    tx = Text(provider_label, style=style)
+    tx.append(" · ", style=DIM)
+    tx.append(t(f"origin_{kind}"))
+    return tx
+
+
+def agent_table_text(run: Run) -> Text:
+    """The compact provider and origin label shown in the run table."""
+    provider_key, kind, style = _agent_parts(run)
+    provider_label = (
+        t(f"provider_{provider_key}_short") if provider_key in ("claude", "codex")
+        else str(run.provider)
+    )
+    tx = Text(provider_label, style=style)
+    tx.append(" · ", style=DIM)
+    tx.append(t(f"origin_short_{kind}"))
     return tx
 
 
@@ -193,22 +241,34 @@ def render_event(ev: Event, verbose: bool, think: Event | None = None) -> Table:
     return grid
 
 
-def activity(s: Session | None, run: Run) -> Text:
+def ago_text(ts: float | None) -> Text:
+    """' · 7s ago' after an event, or nothing when the event has no timestamp (never '- ago')."""
+    return Text(t("act_ago", age=fmt_ago(ts)), style=DIM) if ts else Text("")
+
+
+def activity(s: Session | None, run: Run, *, limit: int | None = 60) -> Text:
     """What the agent is doing now, inferred from the latest events."""
+    def line(text: str) -> str:
+        return first_line(text, limit) if limit is not None else first_line(text, max(1, len(text)))
+
     if s is None:
         return Text(t("act_wait_file"), style=DIM)
     age = fmt_ago(s.last_ts)
     if s.open_questions:
-        return Text(t("act_wait_answer"), style=f"bold {YELLOW}")
-    if run.status == "idle":
+        question = next(iter(s.open_questions.values()), "")
+        if not question:
+            ask = next((event for event in reversed(s.events) if event.kind == "ask"), None)
+            question = (ask.detail or ask.text) if ask else ""
+        return Text(line(question), style=f"bold {YELLOW}")
+    if run.status == "your_turn":
         return Text(t("act_your_turn", age=age), style=BLUE)
     if not run.live:
         return Text(t("act_no_proc", age=age), style=DIM)
     if s.in_flight:
         ev = list(s.in_flight.values())[-1]
         tx = Text(t("act_running"), style=DIM)
-        tx.append(first_line(ev.text, 60), style=CYAN)
-        tx.append(t("act_ago", age=fmt_ago(ev.ts)), style=DIM)
+        tx.append(line(ev.text), style=CYAN)
+        tx.append_text(ago_text(ev.ts))
         return tx
     ev = s.last_event
     if ev is None:
@@ -216,20 +276,20 @@ def activity(s: Session | None, run: Run) -> Text:
     tx = Text()
     if ev.kind == "think":
         tx.append(t("act_thinking"), style=f"italic {VIOLET}")
-        tx.append(f" · {fmt_ago(ev.anchor)}", style=DIM)
+        tx.append_text(ago_text(ev.anchor))
         return tx
     if ev.kind == "cmd":
         tx.append(t("act_ran"), style=DIM)
-        tx.append(first_line(ev.text, 60), style=CYAN)
+        tx.append(line(ev.text), style=CYAN)
     elif ev.kind == "file":
         tx.append(t("act_edited"), style=DIM)
         tx.append(Path(ev.text).name, style=PURPLE)
     elif ev.kind == "msg":
         tx.append(t("act_wrote"), style=DIM)
-        tx.append(first_line(ev.detail or ev.text, 60))
+        tx.append(line(ev.detail or ev.text))
     elif ev.kind == "turn":
         tx.append(t("ev_turn_" + ev.sub) if ev.sub else ev.text, style=GREEN)
     else:
-        tx.append(first_line(ev.text, 60))
-    tx.append(t("act_ago", age=age), style=DIM)
+        tx.append(line(ev.text))
+    tx.append_text(ago_text(s.last_ts))
     return tx

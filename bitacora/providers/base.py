@@ -24,8 +24,8 @@ class Provider:
         """Agent processes in the snapshot that own a session."""
         return []
 
-    def match(self, pi: ProcInfo, claimed: set[Path]) -> Path | None:
-        """The session file a live process is writing to."""
+    def match(self, pi: ProcInfo, claimed: set[Path], peers: Iterable[ProcInfo] = ()) -> Path | None:
+        """The session file a live process is writing to. `peers` are the provider's other live processes."""
         return None
 
     def history(self, since: float) -> Iterable[Path]:
@@ -40,5 +40,9 @@ class Provider:
         return None
 
     def quota(self, sessions: Iterable[Session]) -> dict | None:
-        """Rate-limit windows, when the agent reports them: {"primary": {...}, "secondary": {...}}."""
+        """Return normalized usage metadata: reporting is windows, limit-only, or none.
+
+        Windows carry id, name, minutes, scope, used_percent, resets_at, as_of, and source. Limits carry
+        window, name, scope, reached_at, resets_at, reset_text, and source.
+        """
         return None

@@ -109,13 +109,22 @@ def find_log(pid: int, out: str | None, marker: str) -> str | None:
     return None
 
 
-def kill_tree(pid: int) -> int:
+def kill_tree(pid: int, expected_create: float | None = None) -> int:
     p = psutil.Process(pid)
+    if expected_create is not None and abs(p.create_time() - expected_create) > 0.01:
+        raise psutil.NoSuchProcess(pid)
     procs = p.children(recursive=True) + [p]
+    killed = 0
     for c in procs:
         try:
             c.kill()
+            killed += 1
+        except psutil.NoSuchProcess:
+            continue
         except psutil.Error:
-            pass
-    psutil.wait_procs(procs, timeout=3)
-    return len(procs)
+            if c is p:
+                raise
+    _, alive = psutil.wait_procs(procs, timeout=3)
+    if p in alive:
+        raise psutil.AccessDenied(pid)
+    return killed

@@ -59,30 +59,46 @@ def load(demo_env, sid) -> ClaudeSession:
 def test_print_session(demo_env):
     s = load(demo_env, SID)
     assert s.session_id == SID
-    assert s.origin == "print" and s.headless
+    assert s.origin == "sdk-cli" and s.origin_kind == "background" and s.headless
     assert s.model == "claude-opus-5-5"
     assert s.state == "running"
-    assert s.n_cmds == 2 and s.n_fail == 0
+    assert s.n_cmds == 1 and s.n_fail == 0
     assert list(s.files) == ["CHANGELOG.md"]
     kind, n, _, plus, minus = s.files["CHANGELOG.md"]
-    assert (kind, plus, minus) == ("update", 5, 1)
+    assert (kind, n, plus, minus) == ("update", 2, 8, 2)
     kinds = [e.kind for e in s.events]
-    assert kinds == ["turn", "user", "think", "cmd", "cmd", "think", "file", "msg"]
+    assert kinds == ["turn", "user", "think", "cmd", "tool", "think", "file", "file", "msg"]
     cmd = s.events[3]
     assert cmd.text == "git log --oneline v2.3.0..HEAD" and abs(cmd.dur - 1.0) < 0.01 and cmd.ok
     assert s.events[4].sub == "read"
     # usage: each assistant message counted once
-    assert s.tokens == 6 * (4 + 40_000 + 600 + 300)
-    assert s.ctx_used == 40_604
+    assert s.tokens == 7 * (4 + 40_000 + 600 + 300)
+    assert s.ctx_used == 40_604 and s.context_window == 1_000_000
 
 
 def test_desktop_session_title_and_end_turn(demo_env):
-    s = load(demo_env, "5f0c2a1e-0000-4000-8000-000000000007")
-    assert s.title == "Review PR 42: rate limiter"
-    assert s.origin == "desktop" and not s.headless
+    s = load(demo_env, "5f0c2a1e-0000-4000-8000-00000000000b")
+    assert s.title == "Fix flaky cart widget test"
+    assert s.origin == "claude-desktop" and s.origin_kind == "desktop" and not s.headless
     assert s.state == "complete"
-    assert s.last_agent_message.startswith("Two issues")
+    assert s.last_agent_message.startswith("Found it")
     assert s.events[-1].kind == "turn" and s.events[-1].sub == "complete"
+    assert Run("demo", "claude", s, None, s.label).status == "your_turn"
+
+
+def test_desktop_tool_can_be_quiet_without_being_stopped(demo_env):
+    s = load(demo_env, "5f0c2a1e-0000-4000-8000-000000000007")
+    run = Run("demo", "claude", s, None, s.label)
+    assert s.origin == "claude-desktop" and s.origin_kind == "desktop" and s.state == "running"
+    assert s.in_flight and not s.recently_active(demo_env["now"])
+    assert run.status == "quiet"
+
+
+def test_cli_api_error_after_end_turn_is_failed(demo_env):
+    s = load(demo_env, "5f0c2a1e-0000-4000-8000-000000000009")
+    assert s.origin == "cli" and not s.headless
+    assert s.state == "failed"
+    assert Run("demo", "claude", s, None, s.label).status == "failed"
 
 
 def write(tmp_path, lines) -> ClaudeSession:
@@ -139,10 +155,40 @@ def test_questions_interrupts_and_failures(tmp_path):
         u([{"type": "text", "text": "[Request interrupted by user for tool use]"}]),
     ])
     assert s.open_questions == {}
-    assert s.n_cmds == 2 and s.n_fail == 2
+    assert s.n_cmds == 1 and s.n_fail == 1
+    assert any(event.kind == "err" and event.sub == "Edit" for event in s.events)
     assert s.files == {}  # a failed edit changes nothing
-    assert s.state == "aborted"
+    assert s.state == "stopped"
     assert s.tokens == 45
+
+
+def test_api_error_records_end_the_turn_as_failed_or_limited(tmp_path):
+    def api_error(text, error, status, quota_limits=None):
+        record = {"type": "assistant", "timestamp": "2026-01-01T00:00:02Z", "sessionId": "s",
+                  "isApiErrorMessage": True, "error": error, "apiErrorStatus": status,
+                  "message": {"id": "m2", "role": "assistant", "model": "claude-x", "type": "message",
+                              "content": [{"type": "text", "text": text}], "stop_reason": "synthetic_error",
+                              "stop_sequence": None, "usage": {}, "container": None,
+                              "context_management": None}}
+        if quota_limits is not None:
+            record["quotaLimits"] = quota_limits
+        return record
+
+    failed = api_error("The API request failed.", "api_error", 500)
+    limited = api_error("API Error: 429", "rate_limit", 429,
+                        {"status": "rejected", "resetsAt": 1_800_000_000, "rateLimitType": "five_hour"})
+
+    failed_session = write(tmp_path, [u("go"), failed])
+    limited_session = write(tmp_path, [u("go"), limited])
+
+    assert failed_session.state == "failed"
+    assert limited_session.state == "limited"
+    assert limited_session.limit_info["type"] == "five_hour"
+
+
+def test_max_tokens_stop_reason_completes_the_turn(tmp_path):
+    session = write(tmp_path, [u("go"), a({"type": "text", "text": "Partial answer"}, stop="max_tokens")])
+    assert session.state == "complete"
 
 
 def test_in_flight_tool_shows_until_result(tmp_path):
@@ -167,3 +213,69 @@ def test_resume_cmd(demo_env):
     s = load(demo_env, SID)
     cmd = ClaudeProvider().resume_cmd(Run("k", "claude", s, None, "x"))
     assert cmd == f'cd "{s.cwd}"; claude --resume {SID}'
+
+
+def test_usage_limit_shows_until_claude_answers_again(tmp_path):
+    hit = {"type": "assistant", "timestamp": "2026-01-01T00:00:05Z", "isApiErrorMessage": True,
+           "message": {"model": "<synthetic>", "content": [
+               {"type": "text", "text": "You've hit your weekly limit · resets Sep 30, 1am (America/Montevideo)"}]}}
+    s = write(tmp_path, [u("go"), hit])
+    quota = ClaudeProvider().quota([s])
+    assert quota["reporting"] == "limit-only" and quota["windows"] == []
+    assert quota["limit"]["reset_text"] == "Sep 30, 1am" and quota["limit"]["source"] == "message"
+    later = a({"type": "text", "text": "back"}, stop="end_turn")
+    later["timestamp"] = "2026-01-01T09:00:00Z"
+    s = write(tmp_path, [u("go"), hit, later])
+    assert ClaudeProvider().quota([s]) == {"reporting": "limit-only", "windows": [], "limit": None}
+
+
+def test_structured_limit_record_gives_window_and_reset(tmp_path):
+    """Claude Code writes the limit itself (error + quotaLimits); the wording of the message is not needed."""
+    reset = int(time.time()) + 3600
+    hit = {"type": "assistant", "timestamp": "2026-01-01T00:00:05Z", "isApiErrorMessage": True,
+           "error": "rate_limit", "apiErrorStatus": 429,
+           "quotaLimits": {"status": "rejected", "resetsAt": reset, "rateLimitType": "seven_day"},
+           "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "API Error: 429"}]}}
+    s = write(tmp_path, [u("go"), hit])
+    limit = ClaudeProvider().quota([s])["limit"]
+    assert s.state == "limited"
+    assert limit["window"] == "week" and limit["name"] == "weekly"
+    assert limit["scope"] == "account" and limit["resets_at"] == reset
+    assert limit["source"] == "recorded"
+    # A reset time already in the past means the limit lifted, even if nothing was answered yet.
+    hit["quotaLimits"]["resetsAt"] = int(time.time()) - 60
+    s = write(tmp_path, [u("go"), hit])
+    assert ClaudeProvider().quota([s])["limit"] is None
+
+
+def test_opus_limit_survives_a_later_sonnet_success(tmp_path):
+    hit = {"type": "assistant", "timestamp": "2026-01-01T00:00:05Z", "isApiErrorMessage": True,
+           "error": "rate_limit", "quotaLimits": {"rateLimitType": "seven_day_opus"},
+           "message": {"model": "claude-opus-5-5", "content": [{"type": "text", "text": "API Error: 429"}]}}
+    opus = write(tmp_path, [u("go"), hit])
+    sonnet_reply = a({"type": "text", "text": "back"}, stop="end_turn")
+    sonnet_reply["timestamp"] = "2026-01-01T09:00:00Z"
+    sonnet_reply["message"]["model"] = "claude-sonnet-4-5"
+    sonnet = write(tmp_path, [u("go"), sonnet_reply])
+
+    limit = ClaudeProvider().quota([opus, sonnet])["limit"]
+    assert limit["window"] == "opus-week" and limit["name"] == "weekly Opus"
+    assert limit["scope"] == "model:opus"
+
+    opus_reply = a({"type": "text", "text": "back"}, stop="end_turn")
+    opus_reply["timestamp"] = "2026-01-01T09:00:00Z"
+    opus_reply["message"]["model"] = "claude-opus-5-5"
+    recovered = write(tmp_path, [u("go"), hit, opus_reply])
+    assert ClaudeProvider().quota([recovered])["limit"] is None
+
+
+def test_newer_process_in_the_folder_owns_the_new_file(demo_env):
+    """A process with no transcript yet must not take the file of a process that started after it."""
+    prov = ClaudeProvider()
+    s = load(demo_env, SID)
+    born = ClaudeProvider.born(s.path)
+    older = SimpleNamespace(pid=1, session_id=None, cwd=s.cwd, create=born - 1000)
+    newer = SimpleNamespace(pid=2, session_id=None, cwd=s.cwd, create=born - 5)
+    peers = [older, newer]
+    assert prov.match(older, set(), peers) is None
+    assert prov.match(newer, set(), peers) == s.path

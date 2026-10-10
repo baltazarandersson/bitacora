@@ -1,37 +1,79 @@
 name: Release
 
-# Push a tag like v1.0.0 to build, attach the files to a GitHub release and publish to PyPI.
 on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: read
+
 jobs:
-  dist:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - run: python -m pip install build
+      - run: python scripts/validate_release.py
+
+  checks:
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+
+  dist:
+    needs: [validate, checks]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: python -m pip install build twine
       - run: python -m build
+      - run: python -m twine check --strict dist/*
+      - run: python -m pip install dist/*.whl
+      - run: python -c "from bitacora.window import page_html; assert 'pywebview.api' in page_html()"
       - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/*
 
   windows-exe:
+    needs: [validate, checks]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - run: python -m pip install . pyinstaller
+      - run: python -m pip install ".[window]" pyinstaller
       - run: >
-          pyinstaller --onefile --name bitacora --collect-all textual --collect-all rich
-          --copy-metadata textual scripts/entry.py
-      - run: dist/bitacora.exe --version
+          pyinstaller --noconfirm --onefile --windowed --name bitacora
+          --collect-all textual --collect-all rich --collect-all webview
+          --collect-data bitacora --copy-metadata textual
+          --icon packaging/bitacora.ico scripts/app_entry.py
+      - name: Exercise the frozen app with synthetic sessions
+        shell: python
+        run: |
+          import json
+          import subprocess
+          import time
+          from pathlib import Path
+          report = Path("smoke-report.json")
+          subprocess.run([str(Path("dist/bitacora.exe").resolve()), "--demo", "--smoke-test",
+                          "--smoke-report", str(report.resolve())], check=True, timeout=65)
+          deadline = time.monotonic() + 60
+          result = {}
+          while time.monotonic() < deadline:
+              if report.exists():
+                  result = json.loads(report.read_text(encoding="utf-8"))
+                  if result.get("cleanup") in ("complete", "failed"):
+                      break
+              time.sleep(0.25)
+          assert result.get("cleanup") == "complete" and result.get("ok") and result.get("functional_ok"), result
+          assert result.get("runs") == 16, result
+          assert result["dom"]["rows"] == 16 and result["reader"] == "ready", result
       - uses: actions/upload-artifact@v7
         with:
           name: exe
@@ -53,7 +95,7 @@ jobs:
           generate_release_notes: true
 
   pypi:
-    needs: [dist]
+    needs: [dist, windows-exe, release]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

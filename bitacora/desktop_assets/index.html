@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval'; img-src 'self' data:; font-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
+<title>Bitácora</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<div id="boot" class="boot" aria-busy="true">
+  <div class="boot-name">BITÁCORA</div>
+  <div class="boot-beam"></div>
+  <div id="boot-msg" class="boot-msg"></div>
+</div>
+
+<main id="home" class="home" hidden>
+  <div id="scene-wrap" class="scene-wrap">
+    <canvas id="scene" aria-hidden="true"></canvas>
+    <div id="scene-fallback" class="scene-fallback" hidden>BITÁCORA</div>
+  </div>
+  <div class="home-body">
+    <div class="home-head">
+      <h1 id="home-title" class="home-title" data-t="setup_title"></h1>
+      <span id="home-tagline" class="dim"></span>
+    </div>
+    <p id="home-first" class="home-first" data-t="setup_first" hidden></p>
+    <p id="home-banner" class="banner" role="alert" hidden></p>
+    <div id="view-list" class="view-list" role="listbox" tabindex="0" aria-labelledby="home-title"></div>
+    <p id="home-note" class="home-note" hidden></p>
+    <div id="settings" class="settings"></div>
+    <div class="home-actions">
+      <button id="btn-open" class="btn primary" type="button"><span data-t="desktop_open_monitor"></span><kbd>Enter</kbd></button>
+      <button id="btn-home-help" class="btn" type="button"><span data-t="desktop_help"></span><kbd>?</kbd></button>
+      <button id="btn-home-quit" class="btn" type="button"><span data-t="key_quit"></span><kbd>q</kbd></button>
+    </div>
+    <p class="hint" data-t="desktop_setup_hint"></p>
+  </div>
+</main>
+
+<main id="monitor" class="monitor" hidden>
+  <header id="topbar" class="topbar">
+    <div id="beacon" class="beacon"><span class="lamp">▲</span> bitácora</div>
+    <div id="summary" class="summary"></div>
+    <div id="health" class="health" role="status"></div>
+    <div class="top-actions">
+      <button id="btn-live" class="switch" type="button" aria-pressed="false"></button>
+      <button id="btn-home" class="btn ghost" type="button"><span data-t="key_home"></span><kbd>s</kbd></button>
+      <button id="btn-help" class="btn ghost" type="button"><span data-t="desktop_help"></span><kbd>?</kbd></button>
+    </div>
+  </header>
+
+  <div id="hud" class="hud">
+    <p id="banner" class="banner" role="alert" hidden></p>
+    <div class="quota-line"><span class="hud-label" data-t="hud_quota"></span><div id="quotas" class="quotas"></div></div>
+    <div id="attention" class="attention" hidden></div>
+  </div>
+  <div id="rule" class="rule" aria-hidden="true"><i></i></div>
+
+  <div id="list-wrap" class="list-wrap">
+    <table id="runs" class="runs" role="grid" tabindex="0">
+      <thead>
+        <tr>
+          <th class="c-status" aria-sort="none"><button class="sort-head" type="button" data-sort="status"><span data-t="col_status"></span><span class="sort-arrow" aria-hidden="true"></span></button></th>
+          <th class="c-agent" aria-sort="none"><button class="sort-head" type="button" data-sort="agent"><span data-t="col_agent"></span><span class="sort-arrow" aria-hidden="true"></span></button></th>
+          <th class="c-name" aria-sort="none"><button class="sort-head" type="button" data-sort="name"><span data-t="col_name"></span><span class="sort-arrow" aria-hidden="true"></span></button></th>
+          <th class="c-model" aria-sort="none"><button class="sort-head" type="button" data-sort="model"><span data-t="col_model"></span><span class="sort-arrow" aria-hidden="true"></span></button></th>
+          <th class="c-repo" aria-sort="none"><button class="sort-head" type="button" data-sort="repo"><span data-t="col_repo"></span><span class="sort-arrow" aria-hidden="true"></span></button></th>
+          <th class="c-now" aria-sort="none"><button class="sort-head" type="button" data-sort="now"><span data-t="col_now"></span><span class="sort-arrow" aria-hidden="true"></span></button></th>
+          <th class="c-last" aria-sort="none"><button class="sort-head" type="button" data-sort="last"><span data-t="col_last"></span><span class="sort-arrow" aria-hidden="true"></span></button></th>
+          <th class="c-dur" aria-sort="none"><button class="sort-head" type="button" data-sort="dur"><span data-t="col_dur"></span><span class="sort-arrow" aria-hidden="true"></span></button></th>
+          <th class="c-ctx" aria-sort="none"><button class="sort-head" type="button" data-sort="ctx"><span data-t="col_ctx"></span><span class="sort-arrow" aria-hidden="true"></span></button></th>
+          <th class="c-tok" aria-sort="none"><button class="sort-head" type="button" data-sort="tok"><span data-t="col_tok"></span><span class="sort-arrow" aria-hidden="true"></span></button></th>
+          <th class="c-cmds" aria-sort="none"><button class="sort-head" type="button" data-sort="cmds"><span data-t="col_cmds"></span><span class="sort-arrow" aria-hidden="true"></span></button></th>
+          <th class="c-files" aria-sort="none"><button class="sort-head" type="button" data-sort="files"><span data-t="col_files"></span><span class="sort-arrow" aria-hidden="true"></span></button></th>
+          <th class="c-mode" aria-sort="none"><button class="sort-head" type="button" data-sort="mode"><span data-t="col_mode"></span><span class="sort-arrow" aria-hidden="true"></span></button></th>
+          <th class="c-pid" aria-sort="none"><button class="sort-head" type="button" data-sort="pid"><span data-t="col_pid"></span><span class="sort-arrow" aria-hidden="true"></span></button></th>
+        </tr>
+      </thead>
+      <tbody id="runs-body"></tbody>
+    </table>
+    <div id="list-empty" class="list-empty" hidden></div>
+  </div>
+  <div id="list-edge" class="list-edge" aria-hidden="true" hidden></div>
+  <div id="list-resize" class="list-resize" role="separator" aria-orientation="horizontal" aria-valuemin="15" aria-valuemax="85" aria-valuenow="40" tabindex="-1" data-t-label="desktop_resize_list"></div>
+
+  <section id="selected" class="selected">
+    <div class="hero-row hero-head">
+      <span id="sel-status" class="st status-badge"></span>
+      <span id="sel-label" class="sel-label"></span>
+      <span id="sel-agent" class="agent"></span>
+      <span class="hero-folder"><span id="sel-repo" class="v"></span></span>
+      <div id="sel-actions" class="sel-actions">
+        <button class="btn" type="button" data-act="open_result"><span data-t="key_result"></span><kbd>o</kbd></button>
+        <button class="btn" type="button" data-act="open_log"><span data-t="key_log"></span><kbd>l</kbd></button>
+        <button class="btn" type="button" data-act="copy_resume"><span data-t="key_copy"></span><kbd>c</kbd></button>
+        <button id="btn-actions" class="btn" type="button" data-t-label="desktop_more_actions" aria-haspopup="dialog" hidden>⋯</button>
+        <button class="btn danger" type="button" data-act="stop"><span data-t="desktop_stop"></span><kbd>k</kbd></button>
+      </div>
+    </div>
+    <div id="sel-meta" class="hero-row hero-meta"></div>
+    <div id="sel-usage" class="hero-row hero-usage"></div>
+    <div id="sel-now" class="hero-row hero-now"></div>
+    <div id="sel-question" class="question" hidden></div>
+  </section>
+
+  <div class="tabbar">
+    <div id="tabs" class="tabs" role="tablist"></div>
+    <div class="tab-tools">
+      <span id="detail-warn" class="detail-warn" hidden></span>
+      <button id="btn-latest" class="btn small" type="button" hidden><span data-t="desktop_jump_latest"></span></button>
+      <button id="btn-plain" class="switch" type="button" aria-pressed="false" hidden></button>
+      <button id="btn-verbose" class="switch" type="button" aria-pressed="false"></button>
+      <button id="btn-follow" class="switch" type="button" aria-pressed="true"></button>
+    </div>
+  </div>
+
+  <div id="panes" class="panes">
+    <div id="pane-act" class="pane" role="tabpanel" tabindex="0"></div>
+    <div id="pane-msg" class="pane" role="tabpanel" tabindex="0" hidden></div>
+    <div id="pane-files" class="pane" role="tabpanel" tabindex="0" hidden></div>
+    <div id="pane-log" class="pane" role="tabpanel" tabindex="0" hidden></div>
+    <div id="pane-res" class="pane" role="tabpanel" tabindex="0" hidden></div>
+    <div id="pane-info" class="pane" role="tabpanel" tabindex="0" hidden></div>
+  </div>
+
+  <footer id="keys" class="keys"></footer>
+</main>
+
+<div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+<div id="overlay" class="overlay" hidden>
+  <div id="dialog" class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title"></div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+import time
 from collections.abc import Iterable
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from bitacora.model import Event, ProcInfo, Run, Session
+from bitacora.model import Event, ProcInfo, Run, Session, latest_limit
 from bitacora.procs import Proc
 from bitacora.providers.base import Provider
-from bitacora.util import UUID_RE, first_line, norm_path, parse_iso, rel_to, same_path
+from bitacora.util import UUID_RE, access_kind, as_epoch, first_line, norm_path, parse_iso, rel_to, same_path
 
 NAME_TS_RE = re.compile(r"rollout-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-")
 VALUE_FLAGS = {"-m", "--model", "-c", "--config", "-s", "--sandbox", "-C", "--cd", "-o",
@@ -20,6 +22,8 @@ VALUE_FLAGS = {"-m", "--model", "-c", "--config", "-s", "--sandbox", "-C", "--cd
 # Subcommands that do not own a conversation.
 NON_SESSION = {"app-server", "mcp", "mcp-server", "login", "logout", "completion", "debug", "apply",
                "sandbox", "proto", "cloud", "features", "help", "update", "doctor", "plugin", "marketplace"}
+CODEX_WINDOW_NAMES = {300: "5h", 10080: "weekly"}
+CODEX_WINDOW_IDS = {300: "5h", 10080: "week"}
 
 
 def parse_codex_args(argv: list) -> dict | None:
@@ -71,7 +75,7 @@ def parse_codex_args(argv: list) -> dict | None:
 
 def origin_of(meta: dict) -> tuple[str, bool]:
     source = meta.get("source")
-    originator = str(meta.get("originator") or "")
+    originator = str(meta.get("originator") or "").casefold()
     if source == "exec" or originator == "codex_exec":
         return "exec", True
     if isinstance(source, dict):
@@ -83,6 +87,88 @@ def origin_of(meta: dict) -> tuple[str, bool]:
     if source == "vscode":
         return "ide", False
     return str(source or originator or "?"), False
+
+
+def raw_origin_of(meta: dict) -> str:
+    source = meta.get("source")
+    if isinstance(source, dict):
+        return json.dumps(source, sort_keys=True, ensure_ascii=False)
+    originator = str(meta.get("originator") or "")
+    if source == "exec":
+        return "exec"
+    if "desktop" in originator.casefold():
+        return originator
+    if originator.casefold() == "codex-tui":
+        return originator
+    return str(source if source is not None else meta.get("originator") or "?")
+
+
+def origin_kind_for_raw(raw: str | dict | None) -> str:
+    """Normalize a serialized Codex source or originator value for desktop consumers."""
+    if isinstance(raw, dict):
+        return "subagent"
+    value = str(raw or "").strip()
+    if value.startswith("{"):
+        try:
+            if isinstance(json.loads(value), dict):
+                return "subagent"
+        except ValueError:
+            pass
+    lowered = value.casefold()
+    if lowered in ("exec", "codex_exec"):
+        return "background"
+    if "desktop" in lowered:
+        return "desktop"
+    if lowered in ("codex-tui", "cli"):
+        return "terminal"
+    if lowered == "vscode":
+        return "ide"
+    return "other"
+
+
+def origin_kind_of(meta: dict) -> str:
+    source = meta.get("source")
+    originator = str(meta.get("originator") or "").casefold()
+    if source == "exec" or originator == "codex_exec":
+        return "background"
+    if isinstance(source, dict):
+        return "subagent"
+    if "desktop" in originator:
+        return "desktop"
+    if originator == "codex-tui" or source == "cli":
+        return "terminal"
+    if source == "vscode":
+        return "ide"
+    return origin_kind_for_raw(raw_origin_of(meta))
+
+
+def _task_error(error) -> tuple[str, bool]:
+    if isinstance(error, dict):
+        fields = [str(value) for value in error.values() if isinstance(value, str) and value]
+        message = str(error.get("message") or error.get("codex_error_info") or error.get("detail") or "")
+    else:
+        message = str(error or "")
+        fields = [message] if message else []
+    normalized = re.sub(r"[-_]+", " ", " ".join(fields).lower())
+    limited = any(marker in normalized for marker in ("usage limit", "rate limit", "limit reached"))
+    return message or " ".join(fields), limited
+
+
+def exhausted_window(rate_limits: dict | None, now: float) -> dict | None:
+    """A quota window at 100% that has not reset yet: Codex keeps reporting the bar, not an error."""
+    best = None
+    for key in ("primary", "secondary"):
+        w = (rate_limits or {}).get(key)
+        if not w or not isinstance(w.get("used_percent"), (int, float)) \
+                or isinstance(w.get("used_percent"), bool) or not math.isfinite(w["used_percent"]) \
+                or w["used_percent"] < 100:
+            continue
+        resets_at = as_epoch(w.get("resets_at"))
+        if resets_at is None or resets_at <= now:
+            continue
+        if best is None or resets_at > best["resets_at"]:
+            best = {"window_minutes": w.get("window_minutes"), "resets_at": resets_at, "text": None}
+    return best
 
 
 class CodexSession(Session):
@@ -101,12 +187,19 @@ class CodexSession(Session):
             self.session_id = p.get("id") or p.get("session_id")
             self.cwd = p.get("cwd")
             self.start = parse_iso(p.get("timestamp")) or ts
-            self.origin, self.headless = origin_of(p)
+            _, self.headless = origin_of(p)
+            self.origin = self.origin_raw = raw_origin_of(p)
+            self.origin_kind = origin_kind_of(p)
             return
         if typ == "turn_context":
             self.model = p.get("model") or self.model
-            self.effort = p.get("effort") or self.effort
-            self.sandbox = (p.get("sandbox_policy") or {}).get("type") or self.sandbox
+            if p.get("effort"):
+                self.effort = p["effort"]
+                self.effort_source = "transcript"
+            sandbox = (p.get("sandbox_policy") or {}).get("type")
+            if sandbox:
+                self.sandbox = sandbox
+                self.access_kind = access_kind(sandbox, self.provider)
             return
         if typ == "response_item":
             self._response_item(p, ts)
@@ -118,25 +211,57 @@ class CodexSession(Session):
             self._item(p.get("item") or {}, ts)
         elif et == "task_started":
             self.state = "running"
+            self.open_questions.clear()
             self.add(Event(ts, "turn", "", sub="started"))
         elif et == "task_complete":
-            self.state = "complete"
             self.last_agent_message = p.get("last_agent_message") or self.last_agent_message
-            self.add(Event(ts, "turn", "", sub="complete"))
+            err = p.get("error")
+            self.open_questions.clear()
+            if err:
+                message, limited = _task_error(err)
+                self.state = "limited" if limited else "failed"
+                if limited:
+                    self.limit = (ts or 0.0, message)
+                    self.limit_info = None
+                self.add(Event(ts, "err", first_line(message, 300)))
+            else:
+                self.state = "complete"
+                self.add(Event(ts, "turn", "", sub="complete"))
         elif et == "turn_aborted":
-            self.state = "aborted"
+            self.state = "stopped"
+            self.open_questions.clear()
             self.add(Event(ts, "err", str(p.get("reason", "?")), sub="aborted"))
         elif et == "token_count":
             info = p.get("info") or {}
-            self.tokens = (info.get("total_token_usage") or {}).get("total_tokens") or self.tokens
-            self.ctx_used = (info.get("last_token_usage") or {}).get("input_tokens") or self.ctx_used
-            self.ctx_window = info.get("model_context_window") or self.ctx_window
-            if p.get("rate_limits"):
-                self.rate_limits, self.rate_ts = p["rate_limits"], ts
+            total = (info.get("total_token_usage") or {}).get("total_tokens")
+            last_usage = info.get("last_token_usage") or {}
+            context = last_usage.get("input_tokens")
+            window = info.get("model_context_window")
+            if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
+                self.tokens = total
+            if "input_tokens" in last_usage:
+                self.context_tokens = context if isinstance(context, int) and not isinstance(context, bool) \
+                    and context >= 0 else None
+            if window is not None:
+                self.ctx_window = window if isinstance(window, int) and not isinstance(window, bool) \
+                    and window > 0 else None
+            rl = p.get("rate_limits") or {}
+            # Once the quota runs out Codex reports other limits with empty windows; keep the real ones.
+            if rl.get("primary") or rl.get("secondary"):
+                self.rate_limits, self.rate_ts = rl, ts
+                if not rl.get("rate_limit_reached_type"):
+                    self.last_ok_ts = ts
+            if rl.get("rate_limit_reached_type"):
+                self.state = "limited"
+                self.open_questions.clear()
+                self.limit = (ts or 0.0, str(rl["rate_limit_reached_type"]))
+                self.limit_info = {"type": str(rl["rate_limit_reached_type"])}
         elif et == "thread_settings_applied":
             s = p.get("thread_settings") or {}
             self.model = s.get("model") or self.model
-            self.effort = s.get("reasoning_effort") or self.effort
+            if s.get("reasoning_effort"):
+                self.effort = s["reasoning_effort"]
+                self.effort_source = "transcript"
         elif et == "thread_name_updated" or et == "thread_renamed":
             self.title = p.get("name") or p.get("thread_name") or self.title
         elif et in ("error", "stream_error"):
@@ -287,14 +412,20 @@ class CodexProvider(Provider):
             result.append(ProcInfo("codex", p.pid, p.create, p.cmdline, proc_cwd=p.cwd(), **info))
         return result
 
-    def match(self, pi: ProcInfo, claimed: set[Path]) -> Path | None:
+    def match(self, pi: ProcInfo, claimed: set[Path], peers=()) -> Path | None:
         if pi.session_id:
             for base in self._session_dirs():
                 hits = list(base.rglob(f"*{pi.session_id}.jsonl")) if base.exists() else []
                 if hits:
                     return hits[0]
             return None
-        best = None
+        # A transcript born after a newer same-folder process may belong to that process even when the older
+        # process is the first one visited. Leave the older process unmatched instead of greedily stealing it.
+        if not pi.cwd:
+            return None  # Time alone cannot establish which project/process owns a transcript.
+        rivals = [q for q in peers if q is not pi and q.create > pi.create and q.cwd and pi.cwd
+                  and same_path(q.cwd, pi.cwd)]
+        candidates: list[tuple[float, Path]] = []
         for d in self._date_dirs(1):
             for f in d.glob("rollout-*.jsonl"):
                 nt = self.name_time(f)
@@ -304,10 +435,22 @@ class CodexProvider(Provider):
                 st = parse_iso(meta.get("timestamp")) or nt
                 if pi.cwd and meta.get("cwd") and not same_path(pi.cwd, meta["cwd"]):
                     continue
+                sid = meta.get("id") or meta.get("session_id")
+                if any(q.session_id and q.session_id == sid for q in peers if q is not pi):
+                    continue
+                if any(pi.create < q.create <= st for q in rivals):
+                    continue
                 diff = abs(st - pi.create)
-                if diff < 120 and (best is None or diff < best[0]):
-                    best = (diff, f)
-        return best[1] if best else None
+                if diff < 120:
+                    candidates.append((diff, f))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0])
+        # Timestamps have finite precision; near-ties across live processes are not enough evidence to attach
+        # a PID to a transcript. A false negative is safer than offering actions on the wrong process.
+        if len(candidates) > 1 and candidates[1][0] - candidates[0][0] <= 0.25:
+            return None
+        return candidates[0][1]
 
     def history(self, since: float) -> Iterable[Path]:
         days = max(0, int((datetime.now().timestamp() - since) // 86400)) + 1
@@ -337,8 +480,68 @@ class CodexProvider(Provider):
         return " ".join(parts)
 
     def quota(self, sessions: Iterable[Session]) -> dict | None:
+        """Return Codex windows and any active limit in the shared quota shape."""
+        sessions = list(sessions)
+        now = time.time()
         best = None
         for s in sessions:
             if s.rate_limits and (best is None or (s.rate_ts or 0) > best[0]):
-                best = (s.rate_ts or 0, s.rate_limits)
-        return best[1] if best else None
+                best = (s.rate_ts or 0, s.rate_ts, s.rate_limits)
+        _, snapshot_ts, snapshot = best if best else (None, None, {})
+        windows = []
+        for window_id in ("primary", "secondary"):
+            raw = snapshot.get(window_id)
+            if not isinstance(raw, dict):
+                continue
+            minutes = raw.get("window_minutes")
+            minutes = minutes if isinstance(minutes, int) and not isinstance(minutes, bool) and minutes > 0 else None
+            resets_at = as_epoch(raw.get("resets_at"))
+            raw_percent = raw.get("used_percent")
+            used_percent = raw_percent if isinstance(raw_percent, (int, float)) and \
+                not isinstance(raw_percent, bool) and math.isfinite(raw_percent) else None
+            if resets_at is not None and resets_at <= now:
+                used_percent = None
+            windows.append({
+                "id": CODEX_WINDOW_IDS.get(minutes, f"{minutes}m" if minutes else None),
+                "name": CODEX_WINDOW_NAMES.get(minutes),
+                "minutes": minutes,
+                "scope": "account",
+                "used_percent": used_percent,
+                "resets_at": resets_at,
+                "as_of": snapshot_ts,
+                "source": "recorded",
+            })
+
+        limit = exhausted_window(snapshot, now)
+        if limit:
+            limit["reached_at"] = snapshot_ts
+        else:
+            limit = latest_limit(sessions, now)
+        if limit:
+            limit_type = limit.get("type")
+            source_window = snapshot.get(limit_type) if limit_type in ("primary", "secondary") else None
+            minutes = limit.get("window_minutes")
+            if minutes is None and source_window:
+                minutes = source_window.get("window_minutes")
+            if not isinstance(minutes, int) or isinstance(minutes, bool) or minutes <= 0:
+                minutes = None
+            resets_at = limit.get("resets_at")
+            if resets_at is None and source_window:
+                resets_at = source_window.get("resets_at")
+            normalized_limit = {
+                "window": CODEX_WINDOW_IDS.get(minutes),
+                "name": CODEX_WINDOW_NAMES.get(minutes),
+                "scope": "account",
+                "reached_at": as_epoch(limit.get("reached_at")) if limit.get("reached_at") is not None
+                    else snapshot_ts,
+                "resets_at": as_epoch(resets_at),
+                "reset_text": limit.get("text"),
+                "source": "recorded" if limit.get("type") or limit.get("window_minutes")
+                or limit.get("resets_at") else "message",
+            }
+            if normalized_limit["resets_at"] is not None and normalized_limit["resets_at"] <= now:
+                normalized_limit = None
+        else:
+            normalized_limit = None
+        reporting = "windows" if windows else "limit-only" if normalized_limit else "none"
+        return {"reporting": reporting, "windows": windows, "limit": normalized_limit}

@@ -1,6 +1,7 @@
 """Small helpers shared by the providers and the UI."""
 from __future__ import annotations
 
+import math
 import os
 import re
 import time
@@ -10,6 +11,29 @@ from pathlib import Path
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
 
+def access_kind(raw: str | None, provider: str) -> str | None:
+    """Normalize a provider's raw sandbox or permission mode for presentation."""
+    if raw is None or not str(raw).strip():
+        return None
+    value = str(raw).strip().casefold()
+    if provider == "claude":
+        return {
+            "default": "prompt",
+            "acceptedits": "auto-edit",
+            "plan": "plan",
+            "bypasspermissions": "full-access",
+        }.get(value, "other")
+    return {
+        "read-only": "read-only",
+        "workspace-write": "workspace-write",
+        "prompt": "prompt",
+        "auto-edit": "auto-edit",
+        "plan": "plan",
+        "danger-full-access": "full-access",
+        "full-access": "full-access",
+    }.get(value, "other")
+
+
 def parse_iso(ts: str | None) -> float | None:
     if not ts or not isinstance(ts, str):
         return None
@@ -17,6 +41,21 @@ def parse_iso(ts: str | None) -> float | None:
         return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
+
+
+def as_epoch(value) -> float | None:
+    """Normalize numeric or ISO timestamp input to an epoch value."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if math.isfinite(value) else None
+    if isinstance(value, str):
+        try:
+            numeric = float(value)
+        except ValueError:
+            return parse_iso(value)
+        return numeric if math.isfinite(numeric) else None
+    return None
 
 
 def norm_path(p: str | None) -> str | None:

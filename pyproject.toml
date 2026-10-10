@@ -26,9 +26,10 @@ classifiers = [
     "Topic :: Software Development",
     "Topic :: System :: Monitoring",
 ]
-dependencies = ["textual>=1.0", "psutil>=5.9"]
+dependencies = ["textual>=8.2.8", "psutil>=5.9"]
 
 [project.optional-dependencies]
+window = ["pywebview>=6.2.1"]  # the desktop app: bitacora --window
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
 
 [project.scripts]
@@ -43,7 +44,7 @@ Changelog = "https://github.com/baltazarandersson/bitacora/blob/main/CHANGELOG.m
 path = "bitacora/__init__.py"
 
 [tool.hatch.build.targets.sdist]
-include = ["bitacora", "tests", "README.md", "README.es.md", "CHANGELOG.md", "LICENSE"]
+include = ["/bitacora", "/tests", "/README.md", "/README.es.md", "/CHANGELOG.md", "/LICENSE"]  # anchored: bare names match at any depth
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,3 +1,7 @@
+import multiprocessing
+
 from bitacora.cli import main
 
-main()
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+    main()

@@ -64,3 +64,12 @@ def test_count_lines():
     assert count_lines("a") == 1
     assert count_lines("a\nb\n") == 2
     assert count_lines("a\nb") == 2
+
+
+def test_relaunch_drops_pyinstaller_state(monkeypatch):
+    from bitacora import launcher
+    monkeypatch.setenv("_PYI_APPLICATION_HOME_DIR", "C:/tmp/_MEI123")
+    monkeypatch.setenv("_MEIPASS2", "C:/tmp/_MEI123")
+    env = launcher.clean_env()
+    assert not any(k.upper().startswith(("_PYI", "_MEI")) for k in env)
+    assert env["PYINSTALLER_RESET_ENVIRONMENT"] == "1"

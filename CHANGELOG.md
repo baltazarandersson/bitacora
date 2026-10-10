@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased (1.1.0)
+
+### Desktop app
+
+- Add a Windows desktop app with local assets, no console and one public `bitacora.exe`. Keep the terminal interface available from Python on Windows, Linux and macOS. Require WebView2 Runtime for the desktop app.
+- Preserve the lighthouse, time-aware sky, falling code and themes. Remember window size and text size, and support Home, Help, F11 and all six detail tabs.
+
+### Sessions and values
+
+- Share normalized statuses across providers: question, starting, running, quiet, your turn, done, failed, limit reached, stopped and unknown. Show the evidence for running status in Details; questions without a process stop counting as pending after six hours without transcript activity.
+- Normalize origins, access modes, context, cumulative token totals and quota windows. Keep unknown values unknown, show used quota percentages and reset states, and preserve model-specific Claude limits.
+- Read sessions in a separate process, synchronize changed events and rewritten files, retry transient errors and show reader health. Avoid ambiguous process associations and cached PID reuse.
+- Preserve session memory during migration and failed writes, merge concurrent preference changes, and validate process identity again when confirming Stop. Keep notifications within the current view.
+
+### Interface parity
+
+- Keep fourteen columns and horizontal scrolling in both tables; pin desktop Status and Name. Use short localized Agent labels in the table and full names in the selected session and Details.
+- Order questions first, then live sessions and newest starts. Cycle heading sorting through ascending, descending and default order; support `<`, `>` and Ctrl+R in both interfaces and keyboard-focusable desktop headings.
+- Adapt headers, selected-session panels, footers and Home to available space. Set the desktop minimum to 800×560; keep Stop visible and move secondary actions into an overflow menu.
+- Match question, maximize-list and plain-text shortcuts across interfaces. Toggle Plain text in Messages and Result with `m`; offer selectable text when terminal clipboard copying fails.
+- Cap history at 72 hours, default to Monokai, keep readable theme contrast and update language and shared settings in place. Use singular and plural labels for session counts.
+- Add a divider between the header and list that sweeps while sessions run and turns amber while an answer is pending. Keep the desktop animation within its container and use the same Windows taskbar identity and icon for source and packaged launches.
+
+### Release checks
+
+- Expand the synthetic demo to sixteen runs across six projects, covering questions, live sessions, recovered failures and usage limits for both agents.
+- Validate release tags against the package version. Wait for the cross-platform test matrix, package validation and a hidden frozen-app smoke test before publishing. Require Textual 8.2.8 or newer.
+
 ## 1.0.0 (2026-10-07)
 
 First public release.
