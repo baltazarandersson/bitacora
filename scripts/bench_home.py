@@ -13,12 +13,13 @@ import json
 import statistics
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from bitacora.ui.scene import Scene
 
 SIZES = ((80, 16), (120, 16), (200, 50))
-NOW = datetime(2026, 3, 14, 21, 30)  # night: stars, beam and moon are all active
+# night: stars, beam and moon are all active; the fixed offset keeps the scene identical across machines
+NOW = datetime(2026, 3, 14, 21, 30, tzinfo=timezone(timedelta(hours=-3)))
 TAGLINE = "2 agents running · 1 waiting"
 SEED = 7
 FPS = 15.0

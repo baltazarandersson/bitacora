@@ -5,7 +5,7 @@ tagline and time sequence. If a change to Scene alters any Segment text or Style
 update a hash to make it pass, the visual output is the contract.
 """
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -13,10 +13,16 @@ from bitacora.themes import mix
 from bitacora.ui.masthead import MAX_LEVEL, BeaconRule, beam_strip
 from bitacora.ui.scene import Scene
 
+# moon_phase() turns the clock into an absolute instant, so a naive datetime would make these hashes depend
+# on the host timezone. Pin the offset the frames were recorded with.
+GOLDEN_TZ = timezone(timedelta(hours=-3))
 CASES = [
-    ("night-80x16", 80, 16, datetime(2026, 3, 14, 21, 30), "2 agents running · 1 waiting", [0.0, 0.75, 1.6, 3.2, 6.0]),
-    ("day-120x16", 120, 16, datetime(2026, 3, 14, 11, 5), "1 agent waiting for you", [0.0, 1.25, 2.5, 4.75]),
-    ("night-200x50", 200, 50, datetime(2026, 3, 14, 21, 30), "3 agents running · 1 waiting", [0.0, 2.0, 5.5]),
+    ("night-80x16", 80, 16, datetime(2026, 3, 14, 21, 30, tzinfo=GOLDEN_TZ),
+     "2 agents running · 1 waiting", [0.0, 0.75, 1.6, 3.2, 6.0]),
+    ("day-120x16", 120, 16, datetime(2026, 3, 14, 11, 5, tzinfo=GOLDEN_TZ),
+     "1 agent waiting for you", [0.0, 1.25, 2.5, 4.75]),
+    ("night-200x50", 200, 50, datetime(2026, 3, 14, 21, 30, tzinfo=GOLDEN_TZ),
+     "3 agents running · 1 waiting", [0.0, 2.0, 5.5]),
 ]
 GOLDEN = {
     "night-80x16": [
