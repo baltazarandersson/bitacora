@@ -1,9 +1,11 @@
 """Drive the real Textual app on demo data, headless."""
+import os
 import time
 
 from rich.cells import cell_len
-from textual.widgets import DataTable, RichLog, TabbedContent
+from textual.widgets import DataTable, RichLog, Static, TabbedContent
 
+from bitacora.model import ProcInfo, Run, Session
 from bitacora.providers import all_providers
 from bitacora.store import Config, Memory, State
 from bitacora.themes import contrast, rule_color
@@ -11,6 +13,7 @@ from bitacora.ui import masthead
 from bitacora.ui.app import Bitacora, create_app
 from bitacora.ui.masthead import BeaconRule
 from bitacora.ui.setup import Choice, SetupScreen
+from bitacora.worker import MESSAGES
 
 
 def make_app(demo_env, **kw) -> Bitacora:
@@ -1070,6 +1073,81 @@ async def test_top_line_reports_reader_health_and_switches_live_only(demo_env):
         assert not app.live_only
 
 
+async def test_partial_reader_names_providers_and_keeps_stop(demo_env, tmp_path, monkeypatch):
+    """A failed provider is visible in the reader status, the compact tooltip and Details; Stop still works."""
+    from bitacora.i18n import t
+    from bitacora.ui import render as R
+    from bitacora.ui.masthead import Beacon
+    from bitacora.ui.screens import ConfirmKill
+
+    app = make_app(demo_env, view="everything")
+    async with app.run_test(size=(160, 48)) as pilot:
+        await settle(pilot, app)
+        app.source.mirror.errors = {"zai": "OSError", "codex": "RuntimeError"}
+        assert app.source.health == "partial"
+        assert app.reader_health() == (t("desktop_reader_short_partial"), R.YELLOW, R.YELLOW)
+
+        await pilot.resize_terminal(64, 24)
+        await pilot.pause(0.1)
+        app.render_hud()
+        await pilot.pause(0.1)
+        beacon = app.q("#beacon", Beacon)
+        assert app._compact_reader and "codex, zai" in (beacon.tooltip or "")
+
+        run = synthetic_run(tmp_path, "synthetic:partial", ["hola"])
+        app.runs = [run]
+        app.selected = run.key
+        detail = app.info_text(run).plain
+        assert t("inf_reader") in detail and "codex, zai" in detail  # sorted provider names, no invented labels
+
+        run.proc = ProcInfo("synthetic", 4242, 100.0, [])
+        notes = []
+        monkeypatch.setattr(app, "notify", lambda message, **kw: notes.append(message))
+        app.action_kill()
+        await pilot.pause(0.1)
+        assert isinstance(app.screen, ConfirmKill)  # partial does not block a valid stop
+        assert t("n_not_running") not in notes
+
+
+async def test_kill_runs_off_the_ui_thread(demo_env, tmp_path, monkeypatch):
+    import threading
+
+    import bitacora.ui.app as app_module
+    from bitacora.i18n import t
+
+    app = make_app(demo_env, view="everything")
+    async with app.run_test(size=(160, 48)) as pilot:
+        await settle(pilot, app)
+        run = synthetic_run(tmp_path, "synthetic:kill", ["hola"])
+        run.proc = ProcInfo("synthetic", 4242, 100.0, [])
+        app.runs = [run]
+        app.selected = run.key
+        ui_thread = threading.get_ident()
+        calls = []
+
+        def kill(pid, expected_create=None):
+            calls.append((threading.get_ident(), pid, expected_create))
+            return 2
+
+        refreshed = []
+        monkeypatch.setattr(app_module.procs, "kill_tree", kill)
+        monkeypatch.setattr(app, "refresh_data", lambda: refreshed.append(True))
+        app._notifications.clear()
+        app.action_kill()
+        await pilot.pause(0.1)
+        await pilot.press("y")
+        for _ in range(40):
+            if app._notifications:
+                break
+            await pilot.pause(0.05)
+        assert calls, "kill_tree never ran"
+        ident, pid, created = calls[0]
+        assert ident != ui_thread
+        assert (pid, created) == (4242, 100.0)
+        assert any(str(n.message) == t("n_killed", pid=4242, n=2) for n in app._notifications)
+        assert refreshed == [True]
+
+
 async def test_highlights_read_on_every_theme(demo_env):
     """Text on each highlight the terminal draws reaches WCAG AA (4.5:1) on every theme the app offers: the selected
     row and the home list's cursor, the primary and error buttons, the active tab and every waiting chip."""
@@ -1188,3 +1266,155 @@ async def test_divider_is_still_when_nothing_runs_and_beams_while_sessions_run(d
         assert strip_colors(rule.render_line(0)) == first and set(first) != {muted}
         rule.set_state(False, False)
         assert set(strip_colors(rule.render_line(0))) == {muted}
+
+
+def synthetic_run(tmp_path, key: str, texts: list[str]) -> Run:
+    """A run over a hand-made session: synthetic path, synthetic messages, no real transcript involved."""
+    session = Session(tmp_path / f"{key.replace(':', '-')}.jsonl")
+    session.provider = "synthetic"
+    session.messages.extend((1_700_000_000.0 + i, text) for i, text in enumerate(texts))
+    return Run(key, "synthetic", session, None, key)
+
+
+async def test_messages_repaint_when_the_mirror_window_is_saturated(demo_env, tmp_path):
+    """The mirror caps its copy at MESSAGES * 2, so len(messages) stops growing while new messages arrive."""
+    app = make_app(demo_env, view="everything")
+    async with app.run_test(size=(160, 48)) as pilot:
+        await settle(pilot, app)
+        run = synthetic_run(tmp_path, "synthetic:1", [])
+        app.all_runs = app.runs = [run]
+        app.row_keys, app.selected, app.plain_text = [run.key], run.key, True
+        plain = app.q("#msgs-plain", Static)
+        window = MESSAGES * 2  # 120: the exact point where the mirror starts dropping the oldest message
+        for i in range(window):
+            run.session.messages.append((1_700_000_000.0 + i, f"msg-{i:04d}"))
+        app.render_messages(run)
+        await pilot.pause()
+        painted = plain.render().plain
+        assert "msg-0119" in painted and "msg-0120" not in painted  # the last 60 of 120, as expected
+
+        run.session.messages.append((1_700_000_120.0, "msg-0120"))
+        del run.session.messages[:-window]  # what Mirror.apply does on every payload once the window is full
+        assert len(run.session.messages) == window  # the length no longer moves: it cannot be the only signal
+        assert run.session.messages[-1][1] == "msg-0120"
+        app.render_messages(run)
+        await pilot.pause()
+        painted = plain.render().plain
+        assert "msg-0120" in painted  # the newest message reached the screen
+        assert "msg-0061" in painted and "msg-0060" not in painted  # and the painted window slid with it
+
+
+async def test_messages_repaint_on_run_switch_and_plain_text_switch(demo_env, tmp_path):
+    """The other two reasons to repaint the tab keep working: another run, another rendering mode."""
+    app = make_app(demo_env, view="everything")
+    async with app.run_test(size=(160, 48)) as pilot:
+        await settle(pilot, app)
+        first = synthetic_run(tmp_path, "synthetic:1", ["alpha"])
+        second = synthetic_run(tmp_path, "synthetic:2", ["beta"])
+        app.plain_text = True
+        plain = app.q("#msgs-plain", Static)
+        app.render_messages(first)
+        await pilot.pause()
+        assert "alpha" in plain.render().plain
+        app.render_messages(second)
+        await pilot.pause()
+        painted = plain.render().plain
+        assert "beta" in painted and "alpha" not in painted  # same length, different run: still repainted
+        plain.update("")  # a widget left behind, to prove the mode switch alone forces a repaint
+        app.plain_text = False
+        app.render_messages(second)
+        await pilot.pause()
+        assert "beta" in plain.render().plain
+
+
+async def test_large_result_paints_only_the_recent_tail(demo_env, tmp_path):
+    """A 200 kB result is read from its end: the late marker shows, the early one does not, and a note says so."""
+    from textual.widgets import Markdown
+
+    from bitacora.i18n import t
+
+    app = make_app(demo_env, view="everything")
+    async with app.run_test(size=(160, 48)) as pilot:
+        await settle(pilot, app)
+        run = synthetic_run(tmp_path, "synthetic:tail", [])
+        out = tmp_path / "result-large.txt"
+        filler = "fill " * 12 + "\n"
+        out.write_text("EARLY-MARKER\n" + filler * 3500 + "LATE-MARKER\n", encoding="utf-8")
+        assert out.stat().st_size > 200_000
+        run.out = str(out)
+        app.plain_text = True
+        app.render_result(run)
+        await pilot.pause()
+        note = t("desktop_file_tail")
+        plain = app.q("#res-plain", Static).render().plain
+        assert plain.startswith(f"{out}\n\n{note}\n\n")  # the note follows the path, then the tail
+        assert "LATE-MARKER" in plain and "EARLY-MARKER" not in plain
+        rich = app.q("#res", Markdown).source
+        assert rich.startswith(f"_{out}_\n\n{note}\n\n")
+        assert "LATE-MARKER" in rich and "EARLY-MARKER" not in rich
+
+
+async def test_result_repaints_when_only_the_size_changes(demo_env, tmp_path):
+    """A size change under the same mtime repaints: coarse timestamps alone cannot tell the file changed."""
+    app = make_app(demo_env, view="everything")
+    async with app.run_test(size=(160, 48)) as pilot:
+        await settle(pilot, app)
+        run = synthetic_run(tmp_path, "synthetic:size", [])
+        out = tmp_path / "result-mtime.txt"
+        stamp = 1_700_000_000
+        out.write_text("FIRST-CONTENT\n", encoding="utf-8")
+        os.utime(out, (stamp, stamp))
+        before = out.stat()
+        run.out = str(out)
+        app.plain_text = True
+        app.render_result(run)
+        await pilot.pause()
+        assert "FIRST-CONTENT" in app.q("#res-plain", Static).render().plain
+
+        out.write_text("SECOND-CONTENT-IS-LONGER\n", encoding="utf-8")
+        os.utime(out, (stamp, stamp))
+        after = out.stat()
+        assert after.st_mtime == before.st_mtime and after.st_size != before.st_size
+        app.render_result(run)
+        await pilot.pause()
+        painted = app.q("#res-plain", Static).render().plain
+        assert "SECOND-CONTENT-IS-LONGER" in painted and "FIRST-CONTENT" not in painted
+
+
+async def test_incremental_log_reads_are_capped_and_the_note_closes_the_omitting_pass(demo_env, tmp_path):
+    """A log read starts at its newest bytes, a cap on a growing log skips the start of the delta, and only the
+    pass that left bytes out ends with the tail note."""
+    from bitacora.i18n import t
+
+    app = make_app(demo_env, view="everything")
+    async with app.run_test(size=(160, 48)) as pilot:
+        await settle(pilot, app)
+        run = synthetic_run(tmp_path, "synthetic:log", [])
+        path = tmp_path / "run.log"
+        unit = "a log line with enough words to wrap naturally in the view " + "x" * 600 + "\n"
+        path.write_text("LOG-START-MARKER\n" + unit * 500 + "INITIAL-END-MARKER\n", encoding="utf-8")
+        assert path.stat().st_size > 300_000
+        run.log = str(path)
+        app.action_tab("t-log")
+        await pilot.pause(0.1)
+        app.render_log(run)
+        await pilot.pause()
+        log = app.q("#log", RichLog)
+        note = t("desktop_file_tail")
+        shown = [strip.text.rstrip() for strip in log.lines]
+        assert any("INITIAL-END-MARKER" in text for text in shown)  # the tail of the file
+        assert not any("LOG-START-MARKER" in text for text in shown)  # not its head
+        assert shown[-1] == note
+
+        delta = "DELTA-START-MARKER\n" + unit.replace("x", "y") * 500 + "DELTA-END-MARKER\n"
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(delta)
+        assert path.stat().st_size > 600_000
+        app.render_log(run)
+        await pilot.pause()
+        shown = [strip.text.rstrip() for strip in log.lines]
+        end = max(i for i, text in enumerate(shown) if "INITIAL-END-MARKER" in text)
+        second_pass = shown[shown.index(note, end) + 1:]  # everything after the note that closed the first pass
+        assert second_pass and "DELTA-END-MARKER" in second_pass[-2]  # the newest bytes, then the note
+        assert not any("DELTA-START-MARKER" in text for text in second_pass)  # the skipped start of the delta
+        assert second_pass.count(note) == 1 and second_pass[-1] == note  # one note closes the pass, and no more

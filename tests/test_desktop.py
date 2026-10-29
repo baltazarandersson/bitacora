@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from types import SimpleNamespace
 
@@ -7,7 +8,7 @@ import pytest
 
 from bitacora.collector import Collector
 from bitacora.desktop import DesktopService
-from bitacora.model import ProcInfo
+from bitacora.model import ProcInfo, Run, Session
 from bitacora.providers import all_providers
 from bitacora.runtime import Runtime
 from bitacora.store import Config, Memory, State
@@ -17,6 +18,7 @@ from bitacora.worker import Source
 class SyntheticSource:
     health = "ready"
     error = None
+    provider_errors = {}
 
     def __init__(self, collector):
         self.collector = collector
@@ -42,6 +44,16 @@ class SyntheticSource:
 
     def refresh(self):
         self.pending = True
+
+    def request_page(self, key, before, limit):
+        self.page_request = (key, before, limit)
+        self.page = {"token": 7, "next": 100, "total": 400,
+                     "messages": [{"ts": 1.0, "text": "older"}]}
+        return 7
+
+    def take_page(self, token):
+        page, self.page = getattr(self, "page", None), None
+        return page if token == 7 else None
 
     def stop(self):
         self.stopped = True
@@ -83,6 +95,169 @@ def test_desktop_full_demo_data_and_serializable_contract(service):
     assert detail["log"]["path"].startswith("/demo/")
     assert not auth["actions"]["stop"]  # demo recency is not a real process identity
     json.dumps({"bootstrap": boot, "snapshot": snapshot, "detail": detail}, allow_nan=False)
+
+
+def test_detail_revisions_let_the_client_skip_unchanged_aspects(service):
+    snapshot = service.get_snapshot()
+    auth = next(run for run in snapshot["runs"] if run["label"] == "auth-cookies")
+    full = service.get_detail(auth["key"])
+    assert set(full["revisions"]) == {"messages", "events", "files", "log", "result", "info"}
+    assert all(isinstance(value, int) and not isinstance(value, bool)
+               for value in full["revisions"].values())
+
+    again = service.get_detail(auth["key"], full["revisions"])
+    assert again["run"]["key"] == auth["key"]
+    for aspect in ("messages", "events", "files", "log", "result"):
+        assert aspect not in again
+        assert again["revisions"][aspect] == full["revisions"][aspect]
+
+
+def test_new_message_bumps_only_the_messages_revision(service):
+    snapshot = service.get_snapshot()
+    audit = next(run for run in snapshot["runs"] if run["label"] == "a11y-audit")
+    key = audit["key"]
+    full = service.get_detail(key)
+    run = next(run for run in service._runs if run.key == key)
+    assert run.out and service._stat_sig(run.out) is not None  # a file-backed result does not follow the transcript
+    run.session.messages.append((time.time(), "synthetic follow-up"))
+    service._source.refresh()
+    service.get_snapshot()
+
+    fresh = service.get_detail(key, full["revisions"])
+    assert "messages" in fresh and fresh["revisions"]["messages"] > full["revisions"]["messages"]
+    for aspect in ("events", "files", "log", "result"):
+        assert aspect not in fresh
+
+
+def test_log_growth_bumps_only_the_log_revision(service):
+    snapshot = service.get_snapshot()
+    auth = next(run for run in snapshot["runs"] if run["label"] == "auth-cookies")
+    key = auth["key"]
+    full = service.get_detail(key)
+    run = next(run for run in service._runs if run.key == key)
+    assert run.log
+    with open(run.log, "a", encoding="utf-8") as fh:
+        fh.write("\nsynthetic tail\n")
+
+    fresh = service.get_detail(key, full["revisions"])
+    assert "log" in fresh and fresh["revisions"]["log"] > full["revisions"]["log"]
+    for aspect in ("messages", "events", "files", "result"):
+        assert aspect not in fresh
+
+
+def test_result_fallback_follows_new_messages_and_a_file_appearing(service, tmp_path):
+    service.get_snapshot()
+    run = next(run for run in service._runs if run.label == "auth-cookies")
+    run.out = None
+    session = run.session
+    session.last_agent_message = ""
+    session.messages[:] = [(time.time() - 60, "first synthetic answer")]
+
+    first = service.get_detail(run.key)
+    assert first["result"]["fallback"] and first["result"]["text"] == "first synthetic answer"
+
+    session.gen += 1
+    session.messages.append((time.time(), "second synthetic answer"))
+    again = service.get_detail(run.key, first["revisions"])
+    assert "result" in again and again["revisions"]["result"] > first["revisions"]["result"]
+    assert again["result"]["text"] == "second synthetic answer"
+
+    result_file = tmp_path / "late-result.md"
+    result_file.write_text("answer from the file", encoding="utf-8")
+    run.out = str(result_file)
+    third = service.get_detail(run.key, again["revisions"])
+    assert "result" in third and third["revisions"]["result"] > again["revisions"]["result"]
+    assert third["result"]["text"] == "answer from the file"
+
+
+def test_result_reads_the_recent_tail_with_its_own_note(service, tmp_path):
+    from bitacora.desktop import READ_LIMIT
+    from bitacora.i18n import t
+
+    service.get_snapshot()
+    run = next(run for run in service._runs if run.label == "auth-cookies")
+    filler = "synthetic filler line\n"
+    body = "HEAD-MARKER\n" + filler * (READ_LIMIT // len(filler) + 1) + "TAIL-MARKER\n"
+    assert len(body) > READ_LIMIT
+    result_file = tmp_path / "long-result.md"
+    result_file.write_text(body, encoding="utf-8")
+    run.out = str(result_file)
+
+    result = service.get_detail(run.key)["result"]
+    assert result["available"] and result["path"].endswith("long-result.md")
+    assert "TAIL-MARKER" in result["text"]
+    assert t("desktop_file_tail") in result["text"]
+    assert "HEAD-MARKER" not in result["text"]
+    assert t("desktop_file_head") not in result["text"]
+
+
+def test_missing_result_file_names_result_in_the_error(service, tmp_path):
+    from bitacora.i18n import t
+
+    service.get_snapshot()
+    run = next(run for run in service._runs if run.label == "auth-cookies")
+    run.out = str(tmp_path / "missing-result.md")
+
+    result = service.get_detail(run.key)["result"]
+    assert not result["available"]
+    assert t("n_no_file", what=t("desktop_tab_result")) in result["error"]
+    assert t("desktop_tab_log") not in result["error"]
+
+
+def test_info_refreshes_when_open_questions_change(service):
+    from bitacora.i18n import t
+
+    service.get_snapshot()
+    run = next(run for run in service._runs if run.session is not None and not run.live and run.status != "asking")
+    full = service.get_detail(run.key)
+    run.session.open_questions["synthetic-question"] = "Which branch should ship?"
+
+    fresh = service.get_detail(run.key, full["revisions"])
+    assert "info" in fresh and fresh["revisions"]["info"] > full["revisions"]["info"]
+    info = {field["label"]: field["value"] for field in fresh["info"]}
+    assert info[t("inf_question")] == "Which branch should ship?"
+
+
+def test_detail_rejects_malformed_known_revisions(service):
+    key = service.get_snapshot()["runs"][0]["key"]
+    for bad in ({"messages": "1"}, {"bogus": 1}, {"messages": True}, [], "messages"):
+        assert "error" in service.get_detail(key, bad)
+
+
+def test_detail_exposes_the_message_cursor_and_serves_pages(service):
+    snapshot = service.get_snapshot()
+    auth = next(run for run in snapshot["runs"] if run["label"] == "auth-cookies")
+    key = auth["key"]
+    detail = service.get_detail(key)
+    assert detail["messages_offset"] == 0  # the synthetic source keeps every message
+
+    assert service.get_detail_page(key, 120, 200) == {"token": 7}
+    page = service.get_page(7)
+    assert page["messages"][0]["text"] == "older" and page["next"] == 100
+    assert service.get_page(7) == {"pending": True}
+    for bad in ((key, -1, 200), (key, 0, 0), (key, 0, 10_000)):
+        assert "error" in service.get_detail_page(*bad)
+    assert "error" in service.get_page("7")
+
+
+def test_get_page_reports_a_consumed_token_as_an_expired_page(demo_env):
+    from bitacora.i18n import t
+
+    source = Source(hours=1, scan_procs=False, process=False)
+    source.stop()  # no reader thread: pages are staged in the form the reader would answer them
+    service = DesktopService(Runtime(Config(), State(), all_providers(), "en", None),
+                             view="everything", source=source)
+    try:
+        service.bootstrap()
+        token = source.request_page("synthetic", 100, 50)
+        assert service.get_page(token) == {"pending": True}
+        source._store_page({"token": token, "key": "synthetic", "total": 100, "next": 0,
+                            "messages": [{"ts": 1.0, "text": "older"}]})
+        assert service.get_page(token)["messages"] == [{"ts": 1.0, "text": "older"}]
+        assert service.get_page(token) == {"error": t("desktop_page_expired")}
+        assert service.get_page(token + 1) == {"error": t("desktop_invalid_request")}
+    finally:
+        service.close()
 
 
 def test_snapshot_counts_all_normalized_statuses_without_legacy_keys(service, monkeypatch):
@@ -432,6 +607,38 @@ def test_stop_confirmation_binds_creation_time_and_is_single_use(service, monkey
     assert not service.confirm_stop(request["token"])["ok"]
 
 
+def test_confirm_stop_does_not_hold_the_lock_while_killing(service, monkeypatch):
+    service.get_snapshot()
+    run = next(r for r in service._runs if r.label == "auth-cookies")
+    run.proc = ProcInfo("codex", 4242, 100.0, ["codex"], proc_cwd=run.cwd)
+    import bitacora.desktop as desktop
+
+    monkeypatch.setattr(desktop.psutil, "Process", lambda pid: SimpleNamespace(create_time=lambda: 100.0))
+    calls = []
+
+    def kill(pid, expected_create=None):
+        acquired = []
+
+        def probe():
+            acquired.append(service._lock.acquire(timeout=0.5))
+            if acquired[-1]:
+                service._lock.release()
+
+        prober = threading.Thread(target=probe)
+        prober.start()
+        prober.join()
+        assert acquired == [True], "kill_tree ran while DesktopService._lock was held"
+        calls.append((pid, expected_create))
+        return 1
+
+    monkeypatch.setattr(desktop.procs, "kill_tree", kill)
+    run.proc.session_id = run.session.session_id
+    request = service.request_stop(run.key)
+    assert request["ok"] and request["pid"] == 4242
+    assert service.confirm_stop(request["token"])["ok"]
+    assert calls == [(4242, 100.0)]
+
+
 def test_reader_health_and_close_disable_actions(service):
     snapshot = service.get_snapshot()
     service._source.error = "synthetic error"
@@ -442,6 +649,29 @@ def test_reader_health_and_close_disable_actions(service):
     assert service._source.stopped
     assert "error" in service.get_detail(snapshot["runs"][0]["key"])
     assert "error" in service.save_preferences({"theme": "nord"})
+
+
+def test_partial_reader_reports_provider_errors_and_keeps_stop(service, tmp_path):
+    assert service.get_snapshot()["reader"]["errors"] == []  # a healthy read has nothing to report
+    session = Session(tmp_path / "partial.jsonl")
+    session.provider = "codex"
+    session.session_id = "partial-sid"
+    proc = ProcInfo("codex", 4242, 100.0, [], session_id="partial-sid")
+    run = Run("codex:partial", "codex", session, proc, "partial")
+    service._runs = [run]
+    service._source.provider_errors = {"zai": "OSError", "codex": "RuntimeError"}
+    service._source.health = "partial"
+    snapshot = service.get_snapshot()
+    assert snapshot["reader"]["state"] == "partial"
+    assert snapshot["reader"]["errors"] == [
+        {"provider": "codex", "message": "RuntimeError"},
+        {"provider": "zai", "message": "OSError"},
+    ]
+    assert snapshot["reader"]["error"] is None and snapshot["reader"]["age"] is not None
+    assert snapshot["runs"][0]["actions"]["stop"] is True  # a failed provider does not disable Stop
+
+    service._source.health = "error"
+    assert service.get_snapshot()["runs"][0]["actions"]["stop"] is False
 
 
 def test_scene_reuses_existing_algorithm_and_bounds_dimensions(service):

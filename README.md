@@ -35,9 +35,9 @@ To try it without any agent installed:
 uvx bitacora --demo
 ```
 
-The 1.1 Windows build ships one public executable, `bitacora.exe`, which opens the desktop app without Python or a console. Download it from the [latest release page](https://github.com/baltazarandersson/bitacora/releases/latest). It requires Microsoft Edge WebView2 Runtime. It is not code-signed, so SmartScreen may warn you the first time.
+The 1.2 Windows build ships one public executable, `bitacora.exe`, which opens the desktop app without Python or a console. Download it from the [latest release page](https://github.com/baltazarandersson/bitacora/releases/latest). It requires Microsoft Edge WebView2 Runtime. It is not code-signed, so SmartScreen may warn you the first time.
 
-From a Python install, add `pip install "bitacora[window]"` and run `bitacora --window`. Desktop support in 1.1 targets Windows; the terminal interface remains available on all three systems.
+From a Python install, add `pip install "bitacora[window]"` and run `bitacora --window`. Desktop support in 1.2 targets Windows; the terminal interface remains available on all three systems.
 
 ## What it shows
 
@@ -60,6 +60,7 @@ bitacora --hours 72           # a longer history window
 bitacora --lang es            # Spanish interface
 bitacora --window             # Windows desktop app (optional dependencies)
 bitacora --window --demo      # desktop app with generated sample sessions
+bitacora --diagnostics        # local JSON counters, latencies and memory, then exit
 ```
 
 ![Terminal interface showing generated demo sessions](https://raw.githubusercontent.com/baltazarandersson/bitacora/main/docs/screenshot-en.svg)
@@ -137,11 +138,11 @@ Both interfaces read sessions in a separate process. The desktop app uses packag
 
 ## Privacy
 
-Everything stays on your machine. Bitácora itself makes no requests to external services. The desktop interface and its assets are embedded locally, without an HTTP or WebSocket application server. It never writes to the agents' files. Stopping an agent requires confirmation and checks that the process identity still matches. Its own files hold your preferences, session labels, file paths and observed command lines; `bitacora --paths` shows where.
+Everything stays on your machine. Bitácora itself makes no requests to external services. `bitacora --diagnostics` prints aggregate counters, latencies and memory use for the local machine and exits; it includes no message text, commands or file paths, and sends nothing over the network. The desktop interface and its assets are embedded locally, without an HTTP or WebSocket application server. It never writes to the agents' files. Stopping an agent requires confirmation and checks that the process identity still matches. Its own files hold your preferences, session labels, file paths and observed command lines; `bitacora --paths` shows where.
 ## Limits
 
 - Neither format is documented, and both change between versions. This release was tested with Codex CLI 0.161 and Claude Code 2.1.
-- The CI matrix covers the terminal app on Windows, Linux and macOS with Python 3.11 and 3.13. The Windows build also has a frozen-app smoke check using generated sessions. Desktop Linux/macOS support is outside the 1.1 support scope.
+- The CI matrix covers the terminal app on Windows, Linux and macOS with Python 3.11 and 3.13. The Windows build also has a frozen-app smoke check using generated sessions. Desktop Linux/macOS support is outside the 1.2 support scope.
 - Reasoning is stored encrypted or not at all, so the activity feed shows how long the agent thought rather than what it thought (Codex includes summaries if `model_reasoning_summary` is on).
 - Claude Code's context window is inferred from known model IDs and marked as assumed in Details. Unknown models show the context token count instead of a percentage.
 - Subagent sessions are not grouped under their parent yet.

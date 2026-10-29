@@ -9,7 +9,7 @@ from pathlib import Path
 
 from bitacora import i18n
 from bitacora.providers import Provider, all_providers
-from bitacora.store import Config, Memory, State, capped_hours, load_config
+from bitacora.store import Config, Memory, State, capped_hours, load_config, state_path
 
 
 @dataclass
@@ -51,7 +51,7 @@ def prepare(args):
             hours = args.hours if args.hours is not None else state.get("hours", config.hours)
             config.hours = capped_hours(hours) or 24
             config.notify = bool(state.get("notify", config.notify))
-            yield Runtime(config, state, all_providers(), lang, root)
+            yield Runtime(config, state, all_providers(state_path().parent), lang, root)
         finally:
             if animator:
                 animator.stop.set()

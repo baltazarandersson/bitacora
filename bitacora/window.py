@@ -33,8 +33,9 @@ PROFILE_PREFIX = "bitacora-window-"
 PROFILE_OWNER = ".bitacora-window-owner.json"
 PROFILE_CLEANUP_WAIT = 30.0
 PROFILE_REMOVE_WAIT = 45.0
-METHODS = ("bootstrap", "get_snapshot", "get_detail", "save_preferences", "open_result", "open_log",
-           "copy_resume", "request_stop", "confirm_stop", "get_scene", "quit", "toggle_fullscreen")
+METHODS = ("bootstrap", "get_snapshot", "get_detail", "get_detail_page", "get_page", "save_preferences",
+           "open_result", "open_log", "copy_resume", "request_stop", "confirm_stop", "get_scene", "quit",
+           "toggle_fullscreen")
 
 
 class ProfileBusy(OSError):
@@ -637,8 +638,14 @@ class WindowBridge:
                 self._window.set_title(title)
         return data
 
-    def get_detail(self, key):
-        return self._call("get_detail", key)
+    def get_detail(self, key, known=None):
+        return self._call("get_detail", key, known)
+
+    def get_detail_page(self, key, before, limit):
+        return self._call("get_detail_page", key, before, limit)
+
+    def get_page(self, token):
+        return self._call("get_page", token)
 
     def save_preferences(self, patch):
         data = self._call("save_preferences", patch)

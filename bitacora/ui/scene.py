@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import random
+from bisect import bisect_left, bisect_right
 from datetime import UTC, datetime
 
 from rich.color import Color
@@ -154,8 +155,10 @@ class Scene:
         self.stars = [(r.randrange(w), r.randrange(max(1, self.horizon - 6)), r.uniform(0, 6.28), r.uniform(0.5, 1))
                       for _ in range(max(6, w * h // 55))]
         self.styles: dict = {}
+        self.colors: dict = {}
         self.cell_styles: dict = {}
         self.last_t: float | None = None
+        self.static_key: tuple | None = None
         self._layout()
 
     # ------------------------------------------------------------------ layout
@@ -188,10 +191,12 @@ class Scene:
                 self.shadow_px.add((x + 1, y + 1))
         self.tower_px = {(self.lx + x, self.ly + y): (part, shade) for x, y, part, shade in TOWER} \
             if self.show_tower else {}
+        self.lamp_px = [(self.lx + x, self.ly + y) for x, y, part, _ in TOWER if part == "lamp"] \
+            if self.show_tower else []
         # Geometry of every pixel seen from the lamp: only the beam's direction changes per frame.
         lx, ly = self.lamp
         self.angle = [[math.atan2(y - ly, x - lx) if x > lx else None for x in range(w)] for y in range(self.ph)]
-        self.dist = [[math.hypot(x - lx, y - ly) for x in range(w)] for y in range(self.ph)]
+        self.angle_cols = [tuple(column) for column in zip(*self.angle, strict=True)]  # per column, rising with y
         # Rain mask: the code falls over the open sea, thinning out towards the tower.
         self.mask = [smooth(self.tx + 4, self.tx + w * 0.45, x) * 0.85 + 0.15 * smooth(self.lx + TOWER_W, w, x)
                      for x in range(w)]
@@ -203,7 +208,15 @@ class Scene:
         if st is None:
             if len(self.styles) > 60000:
                 self.styles.clear()
-            st = self.styles[key] = Style(color=Color.from_rgb(*fg), bgcolor=Color.from_rgb(*bg), bold=bold)
+                self.colors.clear()
+            colors = self.colors
+            fg_color = colors.get(fg)
+            if fg_color is None:
+                fg_color = colors[fg] = Color.from_rgb(*fg)
+            bg_color = colors.get(bg)
+            if bg_color is None:
+                bg_color = colors[bg] = Color.from_rgb(*bg)
+            st = self.styles[key] = Style(color=fg_color, bgcolor=bg_color, bold=bold)
         return st
 
     def beam(self, t: float) -> tuple[float, float]:
@@ -270,6 +283,7 @@ class Scene:
             px[y][x] = c
             occ[y][x] = 1
         self.base, self.occ = px, occ
+        self.occ_rows = [bool(any(row)) for row in occ]  # skipped rows avoid two bytearray probes per cell
         self.foam = lerp(FOAM[0], FOAM[1], day)
         self.head_c = lerp(RAIN_HEAD[0], RAIN_HEAD[1], day)
         self.trail_c = lerp(RAIN_TRAIL[0], RAIN_TRAIL[1], day)
@@ -279,7 +293,7 @@ class Scene:
         w, h = self.w, self.h
         dt = 0.0 if self.last_t is None else min(0.25, t - self.last_t)
         self.last_t = t
-        if getattr(self, "static_key", None) != (now.year, now.month, now.day, now.hour, now.minute):
+        if self.static_key != (now.year, now.month, now.day, now.hour, now.minute):
             self._static(now)
         night = self.night
         px = [row[:] for row in self.base]
@@ -295,26 +309,35 @@ class Scene:
         # the beam: a cone of warm haze leaving the lantern; only the cone's pixels are visited
         angle, pulse = self.beam(t)
         strength = pulse * self.lit_mix
-        light: dict[tuple[int, int], float] = {}
+        light: list[dict[int, float] | None] = [None] * self.ph  # per pixel row: x -> glow, sparse
         lx, ly = self.lamp
         if self.show_tower and strength > 0.02:
             lo, hi = math.tan(angle - 0.16), math.tan(angle + 0.16)
+            angle_cols, name_color = self.angle_cols, self.name_color
+            low_angle, high_angle = angle - 0.16, angle + 0.16
+            blend = lerp
             for x in range(lx + 1, w):
                 dx = x - lx
                 y0 = max(0, int(ly + lo * dx) - 1)
                 y1 = min(self.horizon - 1, int(ly + hi * dx) + 1)
                 reach = max(0.35, 1 - dx / (w * 1.15)) * strength
-                for y in range(y0, y1 + 1):
-                    d = abs(self.angle[y][x] - angle)
-                    if d > 0.16:
-                        continue
+                column = angle_cols[x]  # the cone is one contiguous run of rows: bisect beats scanning
+                start = bisect_left(column, low_angle, y0, y1 + 1)
+                end = bisect_right(column, high_angle, start, y1 + 1)
+                for y in range(start, end):
+                    d = abs(column[y] - angle)
                     li = (max(1 - d / 0.045, 0.0) if d < 0.045 else 0.0)
                     li = max(li, (1 - d / 0.16) * 0.35) * reach
-                    light[(x, y)] = li
-                    if not occ[y][x]:
-                        px[y][x] = lerp(px[y][x], LIGHT, li * 0.42)
-                    elif (x, y) in self.name_color:
-                        px[y][x] = lerp(self.name_color[(x, y)], (255, 244, 214), min(1.0, li * 1.3))
+                    row_light = light[y]
+                    if row_light is None:
+                        row_light = light[y] = {}
+                    row_light[x] = li
+                    occ_y = occ[y]
+                    if not occ_y[x]:
+                        px_y = px[y]
+                        px_y[x] = blend(px_y[x], LIGHT, li * 0.42)
+                    elif (x, y) in name_color:
+                        px[y][x] = blend(name_color[(x, y)], (255, 244, 214), min(1.0, li * 1.3))
             for y in range(max(0, ly - 4), min(self.horizon, ly + 5)):  # glow at the lantern
                 for x in range(max(0, lx - 7), min(w, lx + 8)):
                     if occ[y][x]:
@@ -323,9 +346,8 @@ class Scene:
                     if g > 0:
                         px[y][x] = lerp(px[y][x], LIGHT, g)
         glass = lerp(GLASS_DAY, LIGHT, self.lit_mix * (0.6 + 0.4 * pulse))
-        for (x, y), (part, _) in self.tower_px.items():
-            if part == "lamp":
-                px[y][x] = glass
+        for x, y in self.lamp_px:
+            px[y][x] = glass
 
         # sea: moving foam and the moon's glitter
         for y in range(self.horizon, self.ph):
@@ -355,52 +377,96 @@ class Scene:
         tag_x0, tag_x1 = self.tx, self.tx + len(tagline)
         head_c, trail_c = self.head_c, self.trail_c
         style = self.style
+        styles_get = self.styles.get
         cells = self.cell_styles
+        cells_get = cells.get
         if len(cells) > 80000:
             cells.clear()
+        cols, mask, glyphs = self.cols, self.mask, self.glyphs
+        tag_row, occ_rows = self.tag_row, self.occ_rows
+        blend = lerp  # local: the cell loop is the hot path
+        lum = luminance
+        seg_cls = Segment
+        base_kq = [int(0.1 * value * density * 12) for value in mask]  # columns without a trail
+        range_w = range(w)
         out: list[list[Segment]] = []
+        last_a = last_b = None  # last background pair, for the style reuse below
+        last_st = None
         for cy in range(h):
             y0 = cy * 2
             top, low, otop, olow = px[y0], px[y0 + 1], occ[y0], occ[y0 + 1]
-            glyph_row = self.glyphs[cy]
+            glyph_row = glyphs[cy]
             in_sea = y0 >= self.horizon
+            row_empty = not in_sea and not occ_rows[y0] and not occ_rows[y0 + 1]
+            tx0, tx1 = (tag_x0, tag_x1) if cy == tag_row else (0, 0)
+            lit_row = light[y0]
             segs: list[Segment] = []
+            seg_append = segs.append
             run, run_style = "", None
-            for x in range(w):
+            for x in range_w:
                 a, b = top[x], low[x]
-                if cy == self.tag_row and tag_x0 <= x < tag_x1:
-                    bg = lerp(a, b, 0.5)
-                    ink = TAG[1] if luminance(bg) > 0.42 else TAG[0]  # readable over any sky
+                if tx0 <= x < tx1:
+                    bg = blend(a, b, 0.5)
+                    ink = TAG[1] if lum(bg) > 0.42 else TAG[0]  # readable over any sky
                     ch, st = tagline[x - tag_x0], style(ink, bg)
-                elif in_sea or otop[x] or olow[x]:
-                    ch, st = ("▀", style(a, b)) if a != b else (" ", style(a, a))
-                else:
-                    head, _, length = self.cols[x]
-                    dd = head - cy
-                    k = (1.0 if dd < 1 else 0.25 + 0.65 * (1 - dd / length)) if 0 <= dd < length else 0.1
-                    kq = int(k * self.mask[x] * density * 12)  # quantized: styles come from a cache
-                    lq = int(light.get((x, y0), 0.0) * 12)
-                    if kq == 0 and lq == 0:
-                        ch, st = ("▀", style(a, b)) if a != b else (" ", style(a, a))
-                    else:
-                        is_head = 0 <= dd < 1
-                        key = (a, b, kq, lq, is_head)
-                        st = cells.get(key)
+                elif not row_empty and (in_sea or otop[x] or olow[x]):
+                    if a == last_a and b == last_b:
+                        st = last_st
+                    elif a != b:
+                        st = styles_get((a, b, False))
                         if st is None:
-                            bg = lerp(a, b, 0.5)
-                            fg = lerp(bg, head_c if is_head else trail_c, min(1.0, kq / 12))
+                            st = style(a, b)
+                        last_a, last_b, last_st = a, b, st
+                    else:
+                        st = styles_get((a, a, False))
+                        if st is None:
+                            st = style(a, a)
+                        last_a, last_b, last_st = a, a, st
+                    ch = "▀" if a != b else " "
+                else:
+                    col = cols[x]
+                    head, length = col[0], col[2]
+                    dd = head - cy
+                    if 0 <= dd < length:
+                        k = 1.0 if dd < 1 else 0.25 + 0.65 * (1 - dd / length)
+                        kq = int(k * mask[x] * density * 12)  # quantized: styles come from a cache
+                        is_head = dd < 1
+                    else:
+                        kq = base_kq[x]
+                        is_head = False
+                    lq = int(lit_row.get(x, 0.0) * 12) if lit_row is not None else 0
+                    if kq == 0 and lq == 0:
+                        if a == last_a and b == last_b:
+                            st = last_st
+                        elif a != b:
+                            st = styles_get((a, b, False))
+                            if st is None:
+                                st = style(a, b)
+                            last_a, last_b, last_st = a, b, st
+                        else:
+                            st = styles_get((a, a, False))
+                            if st is None:
+                                st = style(a, a)
+                            last_a, last_b, last_st = a, a, st
+                        ch = "▀" if a != b else " "
+                    else:
+                        key = (a, b, kq, lq, is_head)
+                        st = cells_get(key)
+                        if st is None:
+                            bg = blend(a, b, 0.5)
+                            fg = blend(bg, head_c if is_head else trail_c, min(1.0, kq / 12))
                             if lq:
-                                fg = lerp(fg, LIGHT, min(1.0, lq / 12 * 1.6))
+                                fg = blend(fg, LIGHT, min(1.0, lq / 12 * 1.6))
                             st = cells[key] = style(fg, bg, lq > 6)
                         ch = glyph_row[x]
                 if st is run_style:
                     run += ch
                 else:
                     if run:
-                        segs.append(Segment(run, run_style))
+                        seg_append(seg_cls(run, run_style))
                     run, run_style = ch, st
             if run:
-                segs.append(Segment(run, run_style))
+                seg_append(seg_cls(run, run_style))
             out.append(segs)
         return out
 

@@ -62,6 +62,79 @@ def test_truncate_regrow_with_middle_only_change_is_detected(tmp_path):
     assert session.records == [{"value": changed}, {"value": "appended"}]
 
 
+class PickySession(Session):
+    def __init__(self, path):
+        self.records = []
+        super().__init__(path)
+
+    def handle(self, obj):
+        if obj.get("explode"):
+            raise RuntimeError("SECRET prompt /home/user/private.jsonl")
+        self.records.append(obj)
+
+
+def test_discarded_records_are_counted_and_quarantined_without_content(tmp_path):
+    path = tmp_path / "synthetic.jsonl"
+    bad_json = b"not-json SECRET"
+    bad_handle = b'{"explode": "SECRET prompt"}'
+    path.write_bytes(b"\n" + b'{"ok": 1}' + b"\n" + bad_json + b"\n" + bad_handle + b"\n\n")
+    session = PickySession(path)
+
+    assert session.update()
+    assert session.records == [{"ok": 1}]
+    assert session.records_total == 3
+    assert session.discarded == 2
+    assert list(session.quarantine) == [
+        (2, "json", "JSONDecodeError", len(bad_json)),
+        (3, "handle", "RuntimeError", len(bad_handle)),
+    ]
+    assert "SECRET" not in repr(session.quarantine)
+    assert "private.jsonl" not in repr(session.quarantine)
+
+
+def test_quarantine_is_bounded_but_discarded_counts_every_record(tmp_path):
+    from bitacora.model import MAX_QUARANTINE
+
+    path = tmp_path / "synthetic.jsonl"
+    path.write_bytes(b"".join(b"bad-%d\n" % i for i in range(25)))
+    session = RecordingSession(path)
+
+    session.update()
+    assert session.records_total == 25
+    assert session.discarded == 25
+    assert len(session.quarantine) == MAX_QUARANTINE == 20
+    assert session.quarantine[0][0] == 6  # the oldest kept record
+    assert session.quarantine[-1][0] == 25
+
+
+def test_reset_clears_record_counters_and_quarantine(tmp_path):
+    path = tmp_path / "synthetic.jsonl"
+    path.write_bytes(b"bad\n")
+    session = RecordingSession(path)
+    session.update()
+    assert session.records_total == 1 and session.discarded == 1 and session.quarantine
+
+    session.reset()
+    assert session.records_total == 0
+    assert session.discarded == 0
+    assert not session.quarantine
+
+
+def test_blank_and_skippable_lines_are_not_counted(tmp_path):
+    class Skipping(RecordingSession):
+        skip_markers = (b"noise",)
+
+    path = tmp_path / "synthetic.jsonl"
+    path.write_bytes(b"\nnoise only\n" + b'{"value": 1}' + b"\n")
+    session = Skipping(path)
+
+    session.update()
+    assert session.records == [{"value": 1}]
+    assert session.records_total == 1
+    assert session.discarded == 0
+    assert not session.quarantine
+
+
 @pytest.mark.parametrize(
     ("turn", "process", "headless", "question", "age", "expected", "source"),
     [

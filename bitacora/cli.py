@@ -6,7 +6,7 @@ import json
 import sys
 
 from bitacora import __version__, i18n
-from bitacora.store import config_path, state_path
+from bitacora.store import capped_hours, config_path, state_path
 from bitacora.views import BUILTIN
 
 
@@ -19,6 +19,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--lang", choices=i18n.LANGS, help="interface language (default: system)")
     ap.add_argument("--demo", action="store_true", help="run on generated sample sessions")
     ap.add_argument("--paths", action="store_true", help="print where config and state live, and exit")
+    ap.add_argument("--diagnostics", action="store_true", help="print local JSON diagnostics and exit")
+    ap.add_argument("--memory", action="store_true", help="include a tracemalloc peak in diagnostics")
     ap.add_argument("--window", action="store_true", help="open the desktop app (needs bitacora[window])")
     ap.add_argument("--time", metavar="HH:MM", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--version", action="version", version=f"bitacora {__version__}")
@@ -26,10 +28,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    if args.hours is not None:
+        hours = capped_hours(args.hours)
+        if hours is None:
+            parser.error("--hours must be a positive number")
+        args.hours = hours
     if args.paths:
         print(json.dumps({"config": str(config_path()), "state": str(state_path()),
                           "sessions": str(state_path().with_name("sessions.json"))}, indent=1))
+        return
+    if args.diagnostics:
+        from bitacora.diagnostics import collect
+        print(json.dumps(collect(hours=args.hours or 24, memory=args.memory), indent=1, allow_nan=False))
         return
     if args.window:
         from bitacora.window import open_window

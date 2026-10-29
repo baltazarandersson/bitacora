@@ -1,6 +1,7 @@
 """The Textual app. Every label is looked up at draw time, so switching language never restarts anything."""
 from __future__ import annotations
 
+import asyncio
 import math
 import os
 import re
@@ -8,7 +9,6 @@ import subprocess
 import sys
 import time
 from datetime import datetime
-from pathlib import Path
 
 from rich.cells import cell_len
 from rich.table import Table
@@ -192,6 +192,9 @@ def question_text(run: Run) -> str:
 FIRST_PAINT = 150  # events drawn when a session is selected
 PAINT_BATCH = 12  # events drawn per frame
 LOG_ERR = re.compile(r"\b(error|failed|panic)\b", re.I)
+RES_READ_LIMIT = 64_000  # bytes of a result file painted at most
+LOG_INITIAL = 64_000  # bytes of a log painted when the tab first shows it
+LOG_READ_LIMIT = 128_000  # bytes of a log painted per incremental pass
 
 
 def keys_text(follow: bool, live_only: bool, verbose: bool, width: int, list_maximized: bool = False,
@@ -729,9 +732,15 @@ class Bitacora(App):
             return t("desktop_reader_short_error"), f"bold {R.RED}", f"bold {R.RED}"
         if health == "stale":
             return t("desktop_reader_short_stale"), R.YELLOW, R.YELLOW
+        if health == "partial":
+            return t("desktop_reader_short_partial"), R.YELLOW, R.YELLOW
         if health == "loading":
             return t("picker_loading"), R.CYAN, R.DIM
         return t("desktop_reader_ready", age=fmt_dur(time.monotonic() - self.source.last_update)), R.GREEN, R.DIM
+
+    def reader_errors_note(self) -> str:
+        """The failed providers, named exactly as the reader reports them."""
+        return t("desktop_reader_partial", providers=", ".join(sorted(self.source.provider_errors)))
 
     def stats(self) -> dict[str, int]:
         stats = {k: 0 for k in ("asking", "running", "starting", "your_turn", "done", "failed", "limited",
@@ -1020,6 +1029,8 @@ class Bitacora(App):
         summary = self.summary()
         beacon.set_state(self.working(), summary, self.summary_right())
         health = self.reader_health()[0]
+        if self._compact_reader and self.source.health == "partial" and self.source.provider_errors:
+            health = self.reader_errors_note()
         beacon.tooltip = health if self._compact_reader else None
         self.q("#beacon-rule", BeaconRule).set_state(
             any(r.status in ("running", "asking", "starting") for r in self.runs),
@@ -1297,7 +1308,8 @@ class Bitacora(App):
     def render_messages(self, run: Run | None) -> None:
         s = run.session if run else None
         messages = (s.messages if s else [])[-60:]
-        sig = (run and run.key, len(s.messages) if s else 0, self.plain_text)
+        # The mirror caps its copy, so len(messages) stops growing while new ones arrive: sign what is painted.
+        sig = (run and run.key, tuple(messages), self.plain_text)
         markdown = self.q("#msgs", Markdown)
         plain = self.q("#msgs-plain", Static)
         markdown.display = not self.plain_text
@@ -1344,16 +1356,25 @@ class Bitacora(App):
             ostat = os.stat(out) if out else None
         except OSError:
             ostat = None
-        sig = (run and run.key, ostat.st_mtime if ostat else None, len(s.last_agent_message) if s else 0,
-               self.plain_text)
+        sig = (run and run.key, ostat.st_mtime if ostat else None, ostat.st_size if ostat else None,
+               len(s.last_agent_message) if s else 0, self.plain_text)
         if self._shown.get("res") == sig:
             return
         self._shown["res"] = sig
         shown_out = out or t("res_no_out")
         if ostat:
-            content = Path(out).read_text(encoding="utf-8", errors="replace")
-            rich_body = f"_{out}_\n\n" + content
-            plain_body = f"{out}\n\n" + content
+            start = max(0, ostat.st_size - RES_READ_LIMIT)
+            with open(out, "rb") as fh:
+                fh.seek(start)
+                data = fh.read(ostat.st_size - start)
+            content = data.decode("utf-8", errors="replace")
+            note = ""
+            if start > 0:
+                # Drop the half line (or half character) the cutoff landed in, up to its newline.
+                content = content.partition("\n")[2]
+                note = t("desktop_file_tail") + "\n\n"
+            rich_body = f"_{out}_\n\n" + note + content
+            plain_body = f"{out}\n\n" + note + content
         elif s and s.last_agent_message:
             note = t("res_last_msg", out=shown_out)
             rich_body = note + "\n\n" + s.last_agent_message
@@ -1382,19 +1403,28 @@ class Bitacora(App):
         prev = self._shown.get("log")
         if prev and prev[0] == ident and prev[1] == (size or 0):
             return
-        if prev is None or prev[0] != ident or size is None or size < prev[1]:
+        initial = prev is None or prev[0] != ident or size is None or size < prev[1]
+        if initial:
             log.clear()
-            start = max(0, (size or 0) - 64_000)
+            start = max(0, (size or 0) - LOG_INITIAL)
+            skipped = start > 0
         else:
-            start = prev[1]
+            start = max(prev[1], (size or 0) - LOG_READ_LIMIT)
+            skipped = start > prev[1]
         if size is not None and path:
             with open(path, "rb") as fh:
                 fh.seek(start)
                 data = fh.read(size - start)
+            content = data.decode("utf-8", "replace")
+            if skipped:
+                content = content.partition("\n")[2]  # the cutoff may have landed mid-line
             block = Text()
-            for line in data.decode("utf-8", "replace").splitlines():
+            for line in content.splitlines():
                 st = R.RED if LOG_ERR.search(line) else R.CYAN if line.startswith(("exec", "$ ")) else ""
                 block.append(line + "\n", style=st)
+            if skipped:
+                # Only the pass that left bytes out says so; the next pass does not repeat the note.
+                block.append(t("desktop_file_tail") + "\n", style=R.DIM)
             if block:
                 block.rstrip()
                 log.write(block, scroll_end=self.follow)
@@ -1464,6 +1494,8 @@ class Bitacora(App):
         ]
         if s and s.open_questions:
             rows.insert(1, (t("inf_question"), " | ".join(s.open_questions.values())))
+        if self.source.provider_errors:
+            rows.insert(1, (t("inf_reader"), self.reader_errors_note()))
         tx = Text()
         for k, v in rows:
             tx.append(f"{k:>18}  ", style="bold")
@@ -1702,21 +1734,28 @@ class Bitacora(App):
 
     def action_kill(self) -> None:
         run = self.current()
-        if not run or not run.proc or self.source.health != "ready":
+        if not run or not run.proc or self.source.health not in ("ready", "partial"):
             self.notify(t("n_not_running"), severity="warning")
             return
 
         def done(ok: bool | None) -> None:
             if not ok:
                 return
-            try:
-                n = procs.kill_tree(run.proc.pid, expected_create=run.proc.create)
-                self.notify(t("n_killed", pid=run.proc.pid, n=n))
-            except Exception as e:
-                self.notify(t("n_kill_failed", e=e), severity="error")
-            self.refresh_data()
+            pid = run.proc.pid
+            created = run.proc.create
+            self.run_worker(self.kill_process(pid, created), exclusive=True, group="kill")
 
         self.push_screen(ConfirmKill(run), done)
+
+    async def kill_process(self, pid: int, created: float) -> None:
+        try:
+            n = await asyncio.to_thread(procs.kill_tree, pid, expected_create=created)
+        except Exception as e:
+            self.notify(t("n_kill_failed", e=e), severity="error")
+        else:
+            self.notify(t("n_killed", pid=pid, n=n))
+        finally:
+            self.refresh_data()
 
     def _open(self, path: str | None, what: str) -> None:
         if not path or not os.path.exists(path):

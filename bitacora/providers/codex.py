@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import threading
 import time
 from collections.abc import Iterable
 from datetime import datetime, timedelta
@@ -12,7 +13,7 @@ from pathlib import Path
 
 from bitacora.model import Event, ProcInfo, Run, Session, latest_limit
 from bitacora.procs import Proc
-from bitacora.providers.base import Provider
+from bitacora.providers.base import Capabilities, Provider, resume_cwd, resume_value
 from bitacora.util import UUID_RE, access_kind, as_epoch, first_line, norm_path, parse_iso, rel_to, same_path
 
 NAME_TS_RE = re.compile(r"rollout-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-")
@@ -335,10 +336,21 @@ class CodexProvider(Provider):
     label = "Codex"
     marker = "codex"
     session_cls = CodexSession
+    capabilities = Capabilities(titles=True)
+    process_names = ("codex",)
+    WALK_SECS = 120
+    CHECKPOINT_NAME = "codex-index.json"
+    CHECKPOINT_VERSION = 1
+    MAX_INDEX = 10_000
 
-    def __init__(self) -> None:
+    def __init__(self, checkpoint: Path | None = None) -> None:
+        self._checkpoint = checkpoint
+        self._loaded = False
         self._index: dict[str, str] = {}
         self._index_mtime = 0.0
+        self._seen: dict[Path, float] = {}
+        self._walked_at: float = 0.0
+        self._saved_rows: str | None = None
 
     def home(self) -> Path:
         return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
@@ -369,9 +381,9 @@ class CodexProvider(Provider):
     def _session_dirs(self) -> list[Path]:
         return [self.home() / "sessions", self.home() / "archived_sessions"]
 
-    def _date_dirs(self, days: int) -> list[Path]:
+    def _date_dirs(self, days: int, anchor: float | None = None) -> list[Path]:
         dirs = []
-        today = datetime.now()
+        today = datetime.fromtimestamp(time.time() if anchor is None else anchor)
         live, archived = self._session_dirs()
         for d in range(days + 1):
             day = today - timedelta(days=d)
@@ -381,6 +393,126 @@ class CodexProvider(Provider):
         if archived.exists():
             dirs.append(archived)
         return dirs
+
+    def _date_dirs_around(self, ts: float) -> list[Path]:
+        """Local date folders around `ts`: its day, the day before and the day after."""
+        dirs = []
+        day = datetime.fromtimestamp(ts)
+        live, archived = self._session_dirs()
+        for offset in (-1, 0, 1):
+            folder = day + timedelta(days=offset)
+            p = live / f"{folder:%Y}" / f"{folder:%m}" / f"{folder:%d}"
+            if p.exists():
+                dirs.append(p)
+        if archived.exists():
+            dirs.append(archived)
+        return dirs
+
+    def _walk(self) -> None:
+        """Cache every rollout path with its mtime, replacing the previous cache.
+
+        A resumed session appends to the rollout created on its first day, inside an old date
+        folder, and that folder's mtime does not change; date windows alone would lose it. Folder
+        and file names use local time (Codex recorder.rs), so they are walked as-is. One full pass
+        every WALK_SECS rediscovers resumed sessions while normal passes only stat active files.
+        """
+        seen: dict[Path, float] = {}
+        live, archived = self._session_dirs()
+        for root in (live, archived):
+            stack = [root]
+            while stack:
+                try:
+                    with os.scandir(stack.pop()) as entries:
+                        batch = list(entries)
+                except OSError:
+                    continue
+                for entry in batch:
+                    try:
+                        if entry.is_dir():
+                            stack.append(Path(entry.path))
+                        elif entry.name.startswith("rollout-") and entry.name.endswith(".jsonl"):
+                            seen[Path(entry.path)] = entry.stat().st_mtime
+                    except OSError:
+                        continue
+        self._seen = seen
+        self._walked_at = time.time()
+        self._save_checkpoint()
+
+    def _load_checkpoint(self) -> None:
+        """Seed the discovery cache from the last saved snapshot, once.
+
+        Trusting `saved_at` to force a walk would make every cold start (the common case) pay the
+        full scan. The checkpoint stands in for that first walk and the periodic WALK_SECS pass
+        bounds how long a session resumed while the app was closed can go unnoticed.
+        """
+        if self._loaded:
+            return
+        self._loaded = True
+        if self._checkpoint is None or self._seen:
+            return
+        try:
+            data = json.loads(self._checkpoint.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict) or data.get("version") != self.CHECKPOINT_VERSION:
+            return
+        rows = data.get("sessions")
+        if not isinstance(rows, list):
+            return
+        live, archived = self._session_dirs()
+        roots = (live.resolve(), archived.resolve())
+        seen: dict[Path, float] = {}
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) != 2:
+                continue
+            raw, mtime = row
+            if not isinstance(raw, str) or not raw:
+                continue
+            if isinstance(mtime, bool) or not isinstance(mtime, (int, float)) or \
+                    not math.isfinite(mtime) or mtime < 0:
+                continue
+            path = Path(raw)
+            if not path.is_absolute() or not path.name.startswith("rollout-") \
+                    or not path.name.endswith(".jsonl"):
+                continue
+            try:
+                real = path.resolve()
+            except OSError:
+                continue
+            # Lexical containment is not enough: `..` and symlinks can point outside the session trees.
+            if not any(real.is_relative_to(root) for root in roots):
+                continue
+            seen[path] = float(mtime)
+        if not seen:
+            return
+        newest = sorted(seen.items(), key=lambda item: item[1], reverse=True)[:self.MAX_INDEX]
+        self._seen = dict(newest)
+        self._walked_at = time.time()
+
+    def _save_checkpoint(self) -> None:
+        """Persist paths and mtimes only; failures never surface, the next walk rebuilds them."""
+        if self._checkpoint is None:
+            return
+        rows = [[str(path), mtime] for path, mtime in
+                sorted(self._seen.items(), key=lambda item: item[1], reverse=True)[:self.MAX_INDEX]]
+        serialized = json.dumps(rows, separators=(",", ":"))
+        if serialized == self._saved_rows:
+            return
+        data = {"version": self.CHECKPOINT_VERSION, "saved_at": time.time(), "sessions": rows}
+        path = self._checkpoint
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(tmp, "wb") as fh:
+                fh.write(json.dumps(data, separators=(",", ":")).encode("utf-8"))
+            os.replace(tmp, path)
+        except OSError:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        else:
+            self._saved_rows = serialized
 
     @staticmethod
     def name_time(path: Path) -> float | None:
@@ -426,7 +558,7 @@ class CodexProvider(Provider):
         rivals = [q for q in peers if q is not pi and q.create > pi.create and q.cwd and pi.cwd
                   and same_path(q.cwd, pi.cwd)]
         candidates: list[tuple[float, Path]] = []
-        for d in self._date_dirs(1):
+        for d in self._date_dirs_around(pi.create):
             for f in d.glob("rollout-*.jsonl"):
                 nt = self.name_time(f)
                 if f in claimed or nt is None or abs(nt - pi.create) > 180:
@@ -453,31 +585,47 @@ class CodexProvider(Provider):
         return candidates[0][1]
 
     def history(self, since: float) -> Iterable[Path]:
-        days = max(0, int((datetime.now().timestamp() - since) // 86400)) + 1
-        for d in self._date_dirs(days):
-            for f in d.glob("rollout-*.jsonl"):
-                try:
-                    mtime = f.stat().st_mtime
-                except OSError:
-                    continue
-                if max(mtime, self.name_time(f) or 0) >= since:
-                    yield f
+        now = time.time()
+        self._load_checkpoint()
+        if now - self._walked_at >= self.WALK_SECS:
+            self._walk()
+        days = max(0, int((now - since) // 86400)) + 1
+        candidates: set[Path] = set()
+        for d in self._date_dirs(days, now):
+            try:
+                candidates.update(d.glob("rollout-*.jsonl"))
+            except OSError:
+                continue
+        # A resumed session lives in an old date folder it never left, so only the mtime cache finds it.
+        candidates.update(path for path, mtime in self._seen.items() if mtime >= since)
+        for f in candidates:
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                continue
+            self._seen[f] = mtime
+            if max(mtime, self.name_time(f) or 0) >= since:
+                yield f
 
-    def resume_cmd(self, run: Run) -> str | None:
-        sid = run.session.session_id if run.session else None
+    def resume(self, run: Run) -> dict | None:
+        sid = resume_value(run.session.session_id) if run.session else None
         if not sid:
             return None
+        cwd = resume_cwd(run.cwd)
         if not run.headless:
-            return f"codex resume {sid}"
-        parts = ["codex exec resume"]
-        if run.model:
-            parts.append(f"-m {run.model}")
-        if run.effort:
-            parts.append(f'-c model_reasoning_effort="{run.effort}"')
-        if run.sandbox:
-            parts.append(f'-c sandbox_mode="{run.sandbox}"')
-        parts += [sid, "-"]
-        return " ".join(parts)
+            return {"argv": ["codex", "resume", sid], "cwd": cwd}
+        argv = ["codex", "exec", "resume"]
+        model = resume_value(run.model)
+        if model:
+            argv += ["-m", model]
+        effort = resume_value(run.effort)
+        if effort:
+            argv += ["-c", f"model_reasoning_effort={effort}"]
+        sandbox = resume_value(run.sandbox)
+        if sandbox:
+            argv += ["-c", f"sandbox_mode={sandbox}"]
+        argv += [sid, "-"]
+        return {"argv": argv, "cwd": cwd}
 
     def quota(self, sessions: Iterable[Session]) -> dict | None:
         """Return Codex windows and any active limit in the shared quota shape."""

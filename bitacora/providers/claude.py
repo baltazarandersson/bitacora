@@ -10,7 +10,7 @@ from pathlib import Path
 
 from bitacora.model import Event, ProcInfo, Run, Session, latest_limit
 from bitacora.procs import Proc
-from bitacora.providers.base import Provider
+from bitacora.providers.base import Capabilities, Provider, resume_cwd, resume_value
 from bitacora.util import UUID_RE, access_kind, as_epoch, count_lines, first_line, parse_iso, rel_to
 
 VALUE_FLAGS = {"--model", "--effort", "--permission-mode", "--output-format", "--input-format",
@@ -364,6 +364,8 @@ class ClaudeProvider(Provider):
     label = "Claude Code"
     marker = "claude"
     session_cls = ClaudeSession
+    capabilities = Capabilities()
+    process_names = ("claude", "node", "bun")
 
     def home(self) -> Path:
         return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
@@ -470,9 +472,8 @@ class ClaudeProvider(Provider):
             }
         return {"reporting": "limit-only", "windows": [], "limit": limit}
 
-    def resume_cmd(self, run: Run) -> str | None:
-        sid = run.session.session_id if run.session else None
+    def resume(self, run: Run) -> dict | None:
+        sid = resume_value(run.session.session_id) if run.session else None
         if not sid:
             return None
-        cwd = run.cwd
-        return f'cd "{cwd}"; claude --resume {sid}' if cwd else f"claude --resume {sid}"
+        return {"argv": ["claude", "--resume", sid], "cwd": resume_cwd(run.cwd)}

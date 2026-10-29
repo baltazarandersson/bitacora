@@ -1,4 +1,5 @@
 import json
+import shlex
 import time
 from types import SimpleNamespace
 
@@ -210,9 +211,15 @@ def test_match_prefers_id_then_new_file_in_cwd(demo_env):
 
 
 def test_resume_cmd(demo_env):
+    prov = ClaudeProvider()
     s = load(demo_env, SID)
-    cmd = ClaudeProvider().resume_cmd(Run("k", "claude", s, None, "x"))
-    assert cmd == f'cd "{s.cwd}"; claude --resume {SID}'
+    run = Run("k", "claude", s, None, "x")
+    spec = prov.resume(run)
+    assert spec == {"argv": ["claude", "--resume", SID], "cwd": s.cwd}
+    assert prov.resume_cmd(run, shell="sh") == (
+        f"cd -- {shlex.quote(s.cwd)} && {shlex.join(spec['argv'])}")
+    assert prov.resume_cmd(run, shell="powershell") == (
+        f"Set-Location -LiteralPath '{s.cwd}'; claude --resume {SID}")
 
 
 def test_usage_limit_shows_until_claude_answers_again(tmp_path):

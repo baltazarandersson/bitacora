@@ -2,12 +2,14 @@ import errno
 import os
 import pickle
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 from bitacora.collector import Collector
 from bitacora.model import Event, Run, Session
 from bitacora.providers import all_providers
 from bitacora.store import Memory
-from bitacora.worker import Mirror, Packer, Source
+from bitacora.worker import Mirror, Packer, Source, _history_page
 
 
 def transfer(payload):
@@ -75,6 +77,53 @@ def test_reset_generation_replaces_the_mirrored_event_stream(tmp_path):
         (1, "new-0"), (2, "new-1"), (3, "new-2")]
 
 
+def test_pack_and_mirror_transport_provider_errors(tmp_path):
+    session = Session(tmp_path / "synthetic.jsonl")
+    session.provider = "synthetic"
+    run = Run("synthetic:1", "synthetic", session, None, "sample")
+    packer, mirror = Packer(), Mirror()
+
+    assert packer.pack([run], {})["errors"] == {}
+    mirror.apply(transfer(packer.pack([run], {}, {"codex": "RuntimeError"})))
+    assert mirror.errors == {"codex": "RuntimeError"}
+
+    mirror.apply(transfer(packer.pack([run], {}, {"claude": "TimeoutError"})))
+    assert mirror.errors == {"claude": "TimeoutError"}
+
+    mirror.apply(transfer(packer.pack([run], {})))
+    assert mirror.errors == {}
+
+
+def test_source_applies_provider_errors_and_reports_partial_health():
+    source = Source(hours=1, scan_procs=False, process=False)
+    source._q.put(transfer(Packer().pack([], {}, {"codex": "RuntimeError"})))
+
+    assert source.poll() == []
+    assert source.provider_errors == {"codex": "RuntimeError"}
+    assert source.health == "partial"
+
+    source._q.put(transfer(Packer().pack([], {}, {})))
+    source.poll()
+    assert source.provider_errors == {}
+    assert source.health == "ready"
+
+
+def test_source_health_order_is_error_loading_stale_partial_ready():
+    source = Source(hours=1, scan_procs=False, process=False)
+    source.mirror.errors = {"codex": "RuntimeError"}
+
+    assert source.health == "loading"
+    source.last_update = time.monotonic()
+    assert source.health == "partial"
+    source.mirror.errors = {}
+    assert source.health == "ready"
+    source.mirror.errors = {"codex": "RuntimeError"}
+    source.last_update = time.monotonic() - 11
+    assert source.health == "stale"
+    source.error = "synthetic"
+    assert source.health == "error"
+
+
 def test_source_recovers_from_transient_read_error_and_reports_health(monkeypatch, tmp_path):
     import bitacora.worker as worker
 
@@ -90,7 +139,7 @@ def test_source_recovers_from_transient_read_error_and_reports_health(monkeypatc
             return []
 
     monkeypatch.setattr(worker, "Collector", FlakyCollector)
-    monkeypatch.setattr(worker, "all_providers", lambda: [])
+    monkeypatch.setattr(worker, "all_providers", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(worker, "Memory", lambda: object())
     source = Source(hours=1, scan_procs=False, interval=0.01, process=False)
     assert source.health == "loading"
@@ -215,3 +264,74 @@ def test_a_shorter_window_narrows_the_runs_already_shown_before_the_reader_answe
     shown = source.poll()
     assert {run.key for run in shown} == {run.key for run in narrow.collect()}
     assert source.poll() is None  # nothing changed since
+
+
+def test_history_page_slices_and_validates_the_cursor():
+    run = SimpleNamespace(key="k", session=SimpleNamespace(messages=[(float(i), f"m{i}") for i in range(450)]))
+    page = _history_page([run], 7, "k", 450, 200)
+    assert page == {"token": 7, "key": "k", "total": 450, "next": 250,
+                    "messages": [{"ts": float(i), "text": f"m{i}"} for i in range(250, 450)]}
+    middle = _history_page([run], 8, "k", 250, 200)
+    assert middle["next"] == 50 and [m["text"] for m in middle["messages"]] == [f"m{i}" for i in range(50, 250)]
+    last = _history_page([run], 9, "k", 50, 200)
+    assert last["next"] is None and [m["text"] for m in last["messages"]] == [f"m{i}" for i in range(0, 50)]
+    for args in ((True, "k", 0, 10), (1, "k", -1, 10), (1, "k", 0, 0), (1, "missing", 0, 10)):
+        assert "error" in _history_page([run], *args)
+
+
+def test_page_tokens_stay_pending_until_answered_then_expire():
+    source = Source(hours=1, scan_procs=False, process=False)
+    token = source.request_page("k", 100, 50)
+    assert source.take_page(token) is None  # emitted, but the reader has not answered yet
+    page = {"token": token, "key": "k", "total": 200, "next": 0, "messages": []}
+    source._q.put(transfer({"page": page}))  # the same envelope the reader sends
+    source.poll()
+    assert source.take_page(token) == page
+    assert source.take_page(token) == {"error": "expired"}
+    assert source.take_page(token + 1) == {"error": "invalid"}
+    assert source.take_page("1") == {"error": "invalid"}
+
+
+def test_page_token_tracking_is_bounded_and_evicted_pages_expire():
+    source = Source(hours=1, scan_procs=False, process=False)
+    issued = [source.request_page("k", 10, 1) for _ in range(20)]
+    assert len(source._page_pending) == 16
+    for token in issued:
+        source._store_page({"token": token, "key": "k", "total": 1, "next": None, "messages": []})
+    assert len(source._pages) == 16
+    assert source.take_page(issued[0]) == {"error": "expired"}
+    assert source.take_page(issued[-1])["token"] == issued[-1]
+    assert source.take_page(issued[-1] + 1) == {"error": "invalid"}
+
+
+def test_reader_serves_older_message_pages(monkeypatch):
+    class PageCollector:
+        def __init__(self, *args, **kwargs):
+            self.hours = 24
+            self.quotas = {}
+            self.errors = {}
+            self.session = Session(Path("page-source.jsonl"))
+            self.session.messages.extend((float(i), f"m{i}") for i in range(450))
+
+        def collect(self):
+            return [Run("k", "codex", self.session, None, "page")]
+
+    monkeypatch.setattr("bitacora.worker.all_providers", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("bitacora.worker.Memory", lambda: object())
+    monkeypatch.setattr("bitacora.worker.Collector", PageCollector)
+    source = Source(hours=24, scan_procs=False, interval=0.02, process=False)
+    source.start()
+    try:
+        token = source.request_page("k", 450, 200)
+        deadline = time.monotonic() + 5
+        page = None
+        while page is None and time.monotonic() < deadline:
+            source.poll()
+            page = source.take_page(token)
+            if page is None:
+                time.sleep(0.02)
+        assert page is not None
+        assert page["next"] == 250 and page["total"] == 450
+        assert [m["text"] for m in page["messages"][:2]] == ["m250", "m251"]
+    finally:
+        source.stop()

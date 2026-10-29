@@ -1,6 +1,9 @@
 import json
 import os
+import shlex
 import time
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 from bitacora.model import Run
@@ -200,12 +203,24 @@ def test_resume_cmd_has_no_invented_defaults(demo_env):
     prov = CodexProvider()
     s = session_from(demo_env, SID)
     run = Run("k", "codex", s, None, "x")
-    assert prov.resume_cmd(run) == (f'codex exec resume -m gpt-6-luna -c model_reasoning_effort="high" '
-                                    f'-c sandbox_mode="workspace-write" {SID} -')
+    spec = prov.resume(run)
+    assert spec == {
+        "argv": ["codex", "exec", "resume", "-m", "gpt-6-luna",
+                 "-c", "model_reasoning_effort=high", "-c", "sandbox_mode=workspace-write", SID, "-"],
+        "cwd": s.cwd,
+    }
+    assert prov.resume_cmd(run, shell="sh") == (
+        f"cd -- {shlex.quote(s.cwd)} && {shlex.join(spec['argv'])}")
     s.model = s.effort = s.sandbox = None
-    assert prov.resume_cmd(run) == f"codex exec resume {SID} -"
+    spec = prov.resume(run)
+    assert spec == {"argv": ["codex", "exec", "resume", SID, "-"], "cwd": s.cwd}
+    assert prov.resume_cmd(run, shell="sh") == (
+        f"cd -- {shlex.quote(s.cwd)} && {shlex.join(['codex', 'exec', 'resume', SID, '-'])}")
     s.headless = False
-    assert prov.resume_cmd(run) == f"codex resume {SID}"
+    spec = prov.resume(run)
+    assert spec == {"argv": ["codex", "resume", SID], "cwd": s.cwd}
+    assert prov.resume_cmd(run, shell="sh") == (
+        f"cd -- {shlex.quote(s.cwd)} && {shlex.join(['codex', 'resume', SID])}")
 
 
 def test_thread_titles_and_history(demo_env):
@@ -238,7 +253,7 @@ def test_match_leaves_delayed_old_process_unmatched_and_uses_newer_rollout(tmp_p
     older_file.touch()
     newer_file.touch()
     timestamps = {older_file: 1070.0, newer_file: 1055.0}
-    monkeypatch.setattr(prov, "_date_dirs", lambda _days: [tmp_path])
+    monkeypatch.setattr(prov, "_date_dirs_around", lambda _ts: [tmp_path])
     monkeypatch.setattr(prov, "name_time", lambda path: timestamps[path])
     monkeypatch.setattr(prov, "peek_meta", lambda _path: {"cwd": "/repo"})
     old = SimpleNamespace(session_id=None, create=1000.0, cwd="/repo")
@@ -256,7 +271,7 @@ def test_match_leaves_near_tied_rollouts_unmatched(tmp_path, monkeypatch):
     first.touch()
     second.touch()
     timestamps = {first: 1005.0, second: 1005.1}
-    monkeypatch.setattr(prov, "_date_dirs", lambda _days: [tmp_path])
+    monkeypatch.setattr(prov, "_date_dirs_around", lambda _ts: [tmp_path])
     monkeypatch.setattr(prov, "name_time", lambda path: timestamps[path])
     monkeypatch.setattr(prov, "peek_meta", lambda _path: {"cwd": "/repo"})
     pi = SimpleNamespace(session_id=None, create=1000.0, cwd="/repo")
@@ -266,6 +281,254 @@ def test_match_leaves_near_tied_rollouts_unmatched(tmp_path, monkeypatch):
 
 def _rec(ts, typ, payload):
     return json.dumps({"timestamp": ts, "type": typ, "payload": payload})
+
+
+def _iso(ts: float) -> str:
+    """UTC ISO timestamp with milliseconds, the way session_meta records it."""
+    return datetime.fromtimestamp(ts, UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def _fake_rollout(home: Path, start: float, sid: str, cwd: str = "/repo/old") -> Path:
+    """A rollout filed and named in local time, the way Codex writes it under CODEX_HOME."""
+    day = datetime.fromtimestamp(start)
+    folder = home / "sessions" / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"rollout-{day:%Y-%m-%dT%H-%M-%S}-{sid}.jsonl"
+    path.write_text(_rec(_iso(start), "session_meta", {
+        "id": sid, "timestamp": _iso(start), "cwd": cwd, "source": "exec",
+        "originator": "codex_exec"}) + "\n", encoding="utf-8")
+    return path
+
+
+def test_history_finds_a_resumed_session_in_an_old_date_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    now = time.time()
+    path = _fake_rollout(tmp_path, now - 5 * 86400, "0199a1b2-0000-7000-8000-0000000000a1")
+    os.utime(path, (now, now))  # resumed today: old date folder, fresh mtime
+    prov = CodexProvider()
+    since = now - 3600
+
+    assert list(prov.history(since)) == [path]
+    assert list(prov.history(since)) == [path]  # still found on the next pass, with no duplicates
+
+
+def test_history_walks_at_most_once_per_interval(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    now = time.time()
+    _fake_rollout(tmp_path, now - 60, "0199a1b2-0000-7000-8000-0000000000b1")
+    prov = CodexProvider()
+    calls: list[float] = []
+    walk = prov._walk
+
+    def counted() -> None:
+        calls.append(time.time())
+        walk()
+
+    monkeypatch.setattr(prov, "_walk", counted)
+    since = now - 3600
+    list(prov.history(since))
+    list(prov.history(since))
+    assert len(calls) == 1
+    prov._walked_at -= CodexProvider.WALK_SECS + 1
+    list(prov.history(since))
+    assert len(calls) == 2
+
+
+def test_history_walks_once_when_no_sessions_exist(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    prov = CodexProvider()
+    calls: list[float] = []
+    walk = prov._walk
+
+    def counted() -> None:
+        calls.append(time.time())
+        walk()
+
+    monkeypatch.setattr(prov, "_walk", counted)
+    since = time.time() - 60
+    assert list(prov.history(since)) == []
+    assert list(prov.history(since)) == []  # an empty index still waits for the next pass
+    assert len(calls) == 1
+
+
+def test_match_anchors_date_dirs_on_process_start(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    start = (datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
+             - timedelta(days=3)).timestamp()
+    path = _fake_rollout(tmp_path, start, "0199a1b2-0000-7000-8000-0000000000c1")
+    pi = SimpleNamespace(session_id=None, create=start, cwd="/repo/old")
+
+    assert CodexProvider().match(pi, set()) == path
+
+
+def test_history_still_finds_a_new_session_in_todays_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    now = time.time()
+    path = _fake_rollout(tmp_path, now, "0199a1b2-0000-7000-8000-0000000000d1")
+
+    assert list(CodexProvider().history(now - 60)) == [path]
+
+
+def test_walk_ignores_other_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    now = time.time()
+    rollout = _fake_rollout(tmp_path, now, "0199a1b2-0000-7000-8000-0000000000e1")
+    (rollout.parent / "notes.jsonl").write_text("{}\n", encoding="utf-8")
+
+    assert list(CodexProvider().history(now - 60)) == [rollout]
+
+
+def test_checkpoint_roundtrip_avoids_the_first_walk(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    now = time.time()
+    path = _fake_rollout(tmp_path, now - 5 * 86400, "0199a1b2-0000-7000-8000-0000000000f1")
+    os.utime(path, (now, now))
+    checkpoint = tmp_path / "idx.json"
+    since = now - 3600
+
+    assert list(CodexProvider(checkpoint=checkpoint).history(since)) == [path]
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert saved["version"] == 1
+    assert saved["sessions"] == [[str(path), path.stat().st_mtime]]
+
+    loaded = CodexProvider(checkpoint=checkpoint)
+
+    def fail() -> None:
+        raise AssertionError("checkpoint did not replace the first walk")
+
+    monkeypatch.setattr(loaded, "_walk", fail)
+    assert list(loaded.history(since)) == [path]
+
+
+def test_corrupt_checkpoint_falls_back_to_a_walk(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    now = time.time()
+    path = _fake_rollout(tmp_path, now, "0199a1b2-0000-7000-8000-0000000000f2")
+    checkpoint = tmp_path / "idx.json"
+    checkpoint.write_text("{not json", encoding="utf-8")
+
+    assert list(CodexProvider(checkpoint=checkpoint).history(now - 60)) == [path]
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert saved["version"] == 1 and [str(path), path.stat().st_mtime] in saved["sessions"]
+
+
+def test_checkpoint_caps_entries_to_newest(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    now = time.time()
+    paths = []
+    for i in range(5):
+        path = _fake_rollout(tmp_path, now - 10 * 86400 + i, f"0199a1b2-0000-7000-8000-00000000011{i}")
+        os.utime(path, (now - 100 + i, now - 100 + i))
+        paths.append(path)
+    checkpoint = tmp_path / "idx.json"
+    monkeypatch.setattr(CodexProvider, "MAX_INDEX", 3)
+
+    list(CodexProvider(checkpoint=checkpoint).history(now - 3600))
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert set(saved) == {"version", "saved_at", "sessions"}
+    assert len(saved["sessions"]) == 3
+    assert {row[0] for row in saved["sessions"]} == {str(p) for p in paths[2:]}
+    assert all(isinstance(row[0], str) and isinstance(row[1], (int, float))
+               and not isinstance(row[1], bool) for row in saved["sessions"])
+
+
+def test_checkpoint_ignores_paths_outside_the_codex_home(tmp_path, monkeypatch):
+    home = tmp_path / "codex"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    now = time.time()
+    real = _fake_rollout(home, now, "0199a1b2-0000-7000-8000-0000000000f4")
+    outside = tmp_path / "elsewhere" / "rollout-2026-01-01T00-00-00-0199a1b2-0000-7000-8000-0000000000ff.jsonl"
+    outside.parent.mkdir()
+    outside.write_text("{}\n", encoding="utf-8")
+    os.utime(outside, (now, now))
+    checkpoint = tmp_path / "idx.json"
+    checkpoint.write_text(json.dumps({"version": 1, "saved_at": now, "sessions": [
+        [str(outside), now], [str(real), real.stat().st_mtime]]}), encoding="utf-8")
+    provider = CodexProvider(checkpoint=checkpoint)
+
+    def fail() -> None:
+        raise AssertionError("checkpoint did not replace the first walk")
+
+    monkeypatch.setattr(provider, "_walk", fail)
+    assert list(provider.history(now - 3600)) == [real]
+
+    saver = CodexProvider(checkpoint=checkpoint)
+    saver._loaded = True
+    saver._walked_at = 0.0
+    list(saver.history(now - 3600))
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert [row[0] for row in saved["sessions"]] == [str(real)]
+
+
+def test_checkpoint_ignores_non_rollouts_and_path_traversal(tmp_path, monkeypatch):
+    home = tmp_path / "codex"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    now = time.time()
+    real = _fake_rollout(home, now, "0199a1b2-0000-7000-8000-0000000000f6")
+    evil_dir = home / "evil"
+    evil_dir.mkdir()
+    evil = evil_dir / "rollout-2026-01-01T00-00-00-0199a1b2-0000-7000-8000-0000000000fe.jsonl"
+    evil.write_text("{}\n", encoding="utf-8")
+    os.utime(evil, (now, now))
+    notes = real.parent / "notes.jsonl"
+    notes.write_text("{}\n", encoding="utf-8")
+    os.utime(notes, (now, now))
+    # Lexically inside sessions/, but the resolved path lands in codex/evil.
+    traversal = home / "sessions" / "2026" / "01" / "01" / ".." / ".." / ".." / ".." / "evil" / evil.name
+    checkpoint = tmp_path / "idx.json"
+    checkpoint.write_text(json.dumps({"version": 1, "saved_at": now, "sessions": [
+        [str(traversal), now], [str(notes), now], [str(real), real.stat().st_mtime]]}), encoding="utf-8")
+    provider = CodexProvider(checkpoint=checkpoint)
+
+    def fail() -> None:
+        raise AssertionError("checkpoint did not replace the first walk")
+
+    monkeypatch.setattr(provider, "_walk", fail)
+    assert list(provider.history(now - 3600)) == [real]
+    assert [path.name for path in provider._seen] == [real.name]  # traversal and non-rollout rows dropped
+
+
+def test_checkpoint_is_not_rewritten_when_rows_do_not_change(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    now = time.time()
+    path = _fake_rollout(tmp_path, now, "0199a1b2-0000-7000-8000-0000000000f7")
+    checkpoint = tmp_path / "idx.json"
+    provider = CodexProvider(checkpoint=checkpoint)
+    since = now - 60
+    assert list(provider.history(since)) == [path]
+
+    replaced: list[tuple] = []
+    real_replace = os.replace
+
+    def counted(src, dst):
+        replaced.append((src, dst))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", counted)
+    provider._walked_at -= CodexProvider.WALK_SECS + 1
+    assert list(provider.history(since)) == [path]
+    assert replaced == []  # same paths and mtimes: the file on disk is left alone
+
+    newer = now + 30
+    os.utime(path, (newer, newer))
+    provider._walked_at -= CodexProvider.WALK_SECS + 1
+    assert list(provider.history(since)) == [path]
+    assert len(replaced) == 1
+
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert saved["sessions"] == [[str(path), path.stat().st_mtime]]
+
+
+def test_checkpoint_read_error_does_not_break_history(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    now = time.time()
+    path = _fake_rollout(tmp_path, now, "0199a1b2-0000-7000-8000-0000000000f5")
+    checkpoint = tmp_path / "idx.json"
+    checkpoint.mkdir()
+
+    assert list(CodexProvider(checkpoint=checkpoint).history(now - 60)) == [path]
 
 
 def test_quota_survives_the_limit_and_reports_it(tmp_path):

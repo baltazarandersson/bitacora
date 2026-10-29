@@ -12,7 +12,9 @@ to read and use with a mouse.
 - **The monitor header** adapts without a fold control. Its first line shows the brand, status counts, view and
   window, reader health and Live switch; desktop also has Home and Help. At narrow widths, counts compact to
   symbols such as `●2 ?1 ✓8 ✗3`, then non-urgent counts disappear. Asking and running counts plus the view and
-  window stay visible. Reader health shortens to a dot with a tooltip. A single compact quota line follows,
+  window stay visible. Reader health shortens to a dot with a tooltip. When only some providers fail, a
+  warning-colored partial notice names them in the banner and tooltip while the list keeps the last good data.
+  A single compact quota line follows,
   with bars, percentages and shortened renewal times; desktop tooltips and Details keep the full renewal
   detail. A question line appears only while questions are open; its count appears in the first line only when
   that question line is hidden. The terminal hides only the quota line on very short screens, without a key.
@@ -33,7 +35,8 @@ to read and use with a mouse.
   be pasted into a terminal; copying does not reopen or answer the agent.
 - **Six tabs** (Activity, Messages, Files, Log, Result and Details) keep the terminal's contents. Activity draws
   the latest 300 events and says how many earlier ones are hidden. Messages and results show light formatting;
-  the Plain text switch turns it off in both interfaces. Full detail, Auto-scroll and Live only show their
+  the Plain text switch turns it off in both interfaces. Older messages load a page at a time and the loaded
+  window stays bounded, dropping the oldest pages first. Full detail, Auto-scroll and Live only show their
   state, and scrolling up pauses Auto-scroll.
 - **Footer and type**: footer groups refit after text-size changes and saved preferences. They never overflow or
   hide groups that fit; short screens keep a compact `g` maximize-state and `?` help strip. Cascadia Mono falls

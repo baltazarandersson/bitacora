@@ -30,7 +30,7 @@ dependencies = ["textual>=8.2.8", "psutil>=5.9"]
 
 [project.optional-dependencies]
 window = ["pywebview>=6.2.1"]  # the desktop app: bitacora --window
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "playwright>=1.64", "ruff>=0.6"]
 
 [project.scripts]
 bitacora = "bitacora.cli:main"

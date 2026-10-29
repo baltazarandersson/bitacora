@@ -20,5 +20,11 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -e ".[dev]"
+      - name: Install Playwright Chromium (Linux)
+        if: runner.os == 'Linux'
+        run: python -m playwright install --with-deps chromium
+      - name: Install Playwright Chromium (Windows and macOS)
+        if: runner.os != 'Linux'
+        run: python -m playwright install chromium
       - run: python -m ruff check .
       - run: python -m pytest -q

@@ -11,6 +11,16 @@ from pathlib import Path
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
 
+def _format_error(exc: BaseException) -> str:
+    """Reader diagnostics omit exception filenames and payloads, which can contain local session details."""
+    name = type(exc).__name__
+    code = getattr(exc, "errno", None)
+    detail = getattr(exc, "strerror", None)
+    if code is not None and detail:
+        return f"{name} (errno {code}): {detail[:160]}"
+    return name
+
+
 def access_kind(raw: str | None, provider: str) -> str | None:
     """Normalize a provider's raw sandbox or permission mode for presentation."""
     if raw is None or not str(raw).strip():

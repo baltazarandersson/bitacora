@@ -647,6 +647,7 @@ td.now.dead, td.c-last, td.c-dur, td.c-model { color: var(--dim); }
 .ev-body { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
 .ev-earlier, .ev-cut { color: var(--dim); }
 .ev-earlier { padding-bottom: 0.3rem; }
+.load-older { display: block; width: 100%; margin: 0 0 0.5rem; }
 .ev-block { margin: 0.1rem 0 0.15rem; border-left: 1px solid var(--line-strong); padding-left: 1ch; }
 .ev-pre { margin: 0; font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
 .ev-block.think { border-left-style: dashed; }

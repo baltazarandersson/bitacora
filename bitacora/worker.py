@@ -17,21 +17,14 @@ from pathlib import Path
 from bitacora.collector import Collector
 from bitacora.model import MAX_EVENTS, Event, ProcInfo, Run, Session
 from bitacora.providers import all_providers
-from bitacora.store import Memory
+from bitacora.store import Memory, state_path
+from bitacora.util import _format_error
 
 TAIL = 400  # events sent for a session the UI has not seen yet
 MESSAGES = 60
+PAGE_LIMIT = 200  # older messages served per explicit request
 EVENT_FIELDS = tuple(field.name for field in fields(Event))
 
-
-def _format_error(exc: BaseException) -> str:
-    """Reader diagnostics omit exception filenames and payloads, which can contain local session details."""
-    name = type(exc).__name__
-    code = getattr(exc, "errno", None)
-    detail = getattr(exc, "strerror", None)
-    if code is not None and detail:
-        return f"{name} (errno {code}): {detail[:160]}"
-    return name
 SCALARS = ("session_id", "cwd", "start", "origin", "origin_raw", "origin_kind", "headless", "model", "effort",
            "effort_source", "sandbox", "access_kind", "title", "first_prompt", "last_ts", "state",
            "last_agent_message", "n_cmds", "n_fail", "tokens", "usage_basis", "ctx_used", "ctx_window",
@@ -46,7 +39,7 @@ class Packer:
         # path -> (session generation, events sent, messages sent, snapshots of events already sent).
         self.sent: dict[Path, tuple[int, int, int, dict[int, tuple]]] = {}
 
-    def pack(self, runs: list[Run], quotas: dict) -> dict:
+    def pack(self, runs: list[Run], quotas: dict, errors: dict | None = None) -> dict:
         out = []
         live_paths = set()
         for r in runs:
@@ -67,6 +60,7 @@ class Packer:
                 messages = s.messages[msg_sent:] if not reset else s.messages[-MESSAGES:]
                 sd = {"path": str(s.path), "provider": s.provider, "reset": reset,
                       "attrs": {k: getattr(s, k) for k in SCALARS}, "events": events, "messages": messages,
+                      "messages_total": len(s.messages),
                       "files": dict(s.files), "open_questions": dict(s.open_questions),
                       "in_flight": dict(s.in_flight)}
                 sent_now = signatures if not reset else {}
@@ -78,12 +72,31 @@ class Packer:
             out.append({"key": r.key, "provider": r.provider, "proc": r.proc, "label": r.label, "out": r.out,
                         "log": r.log, "session": sd})
         self.sent = {p: v for p, v in self.sent.items() if p in live_paths}
-        return {"runs": out, "quotas": quotas}
+        return {"runs": out, "quotas": quotas, "errors": dict(errors or {})}
 
 
 def _event_signature(event: Event) -> tuple:
     """A stable snapshot catches mutable events such as merged reasoning blocks."""
     return tuple(getattr(event, name) for name in EVENT_FIELDS)
+
+
+def _history_page(runs: list[Run], token, key, before, limit) -> dict:
+    """Older messages for one run, newest page first; `before` is an absolute message index."""
+    if isinstance(token, bool) or not isinstance(token, int) or token < 0:
+        return {"error": "invalid"}
+    if not isinstance(key, str) or isinstance(before, bool) or not isinstance(before, int) or before < 0:
+        return {"error": "invalid"}
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= PAGE_LIMIT:
+        return {"error": "invalid"}
+    run = next((candidate for candidate in runs if candidate.key == key), None)
+    if run is None or run.session is None:
+        return {"token": token, "key": key, "error": "missing"}
+    messages = run.session.messages
+    total = len(messages)
+    end = min(before, total)
+    start = max(0, end - limit)
+    return {"token": token, "key": key, "total": total, "next": start if start else None,
+            "messages": [{"ts": ts, "text": text} for ts, text in messages[start:end]]}
 
 
 def _touched_since(session: Session, since: float) -> bool:
@@ -102,6 +115,7 @@ class Mirror:
     def __init__(self) -> None:
         self.sessions: dict[str, Session] = {}
         self.quotas: dict = {}
+        self.errors: dict[str, str] = {}
 
     def apply(self, payload: dict) -> list[Run]:
         runs = []
@@ -126,22 +140,26 @@ class Mirror:
                 s.events.extend(sorted(by_seq.values(), key=lambda event: event.seq)[-MAX_EVENTS:])
                 s.messages.extend(sd["messages"])
                 del s.messages[:-MESSAGES * 2]
+                s.messages_total = sd.get("messages_total", len(s.messages))
                 s.files, s.open_questions, s.in_flight = sd["files"], sd["open_questions"], sd["in_flight"]
             proc: ProcInfo | None = item["proc"]
             runs.append(Run(item["key"], item["provider"], s, proc, item["label"], item["out"], item["log"]))
         self.sessions = {p: s for p, s in self.sessions.items() if p in seen}
         self.quotas = payload["quotas"]
+        self.errors = payload.get("errors") or {}
         return runs
 
 
 def _loop(send, commands, hours: float, scan_procs: bool, interval: float, stop) -> None:
     """Send data snapshots; on a failed scan send an error-only envelope and retry with bounded backoff."""
-    collector = Collector(all_providers(), Memory(), hours, scan_procs)
+    collector = Collector(all_providers(state_path().parent), Memory(), hours, scan_procs)
     packer = Packer()
     failures = 0
+    runs: list[Run] = []
     while not stop():
         try:
-            payload = packer.pack(collector.collect(), collector.quotas)
+            runs = collector.collect()
+            payload = packer.pack(runs, collector.quotas, getattr(collector, "errors", None))
         except Exception as exc:
             # A transient file/provider failure must not permanently stop the reader. Keep the last good
             # mirror in place and report health separately from data.
@@ -164,6 +182,11 @@ def _loop(send, commands, hours: float, scan_procs: bool, interval: float, stop)
                 return
             if isinstance(cmd, tuple) and cmd[0] == "hours":
                 collector.hours = cmd[1]
+            elif isinstance(cmd, tuple) and len(cmd) == 5 and cmd[0] == "page":
+                try:
+                    send({"page": _history_page(runs, *cmd[1:])})
+                except (BrokenPipeError, EOFError, OSError):
+                    return
             if cmd == "refresh":
                 break
             cmd = commands(0)
@@ -209,17 +232,27 @@ class Source:
         self.hours = hours  # the window shown; runs outside it are dropped even from a payload built before a change
         self._latest: list[Run] | None = None  # the runs last returned, so a new window can narrow them at once
         self._window_changed = False
+        self._pages: dict[int, dict] = {}
+        self._page_pending: set[int] = set()  # tokens issued for a page the reader has not answered yet
+        self._page_token = 0
         self.error: str | None = None  # sanitized diagnostic; excludes filenames and session payloads
         self.last_update: float | None = None  # time.monotonic() at the last successful collection received
 
     @property
     def health(self) -> str:
-        """Reader health for a renderer: loading, ready, stale or error."""
+        """Reader health for a renderer: loading, ready, stale, partial or error."""
         if self.error:
             return "error"
         if self.last_update is None:
             return "loading"
-        return "stale" if time.monotonic() - self.last_update > max(3 * self.interval, 10.0) else "ready"
+        if time.monotonic() - self.last_update > max(3 * self.interval, 10.0):
+            return "stale"
+        return "partial" if self.mirror.errors else "ready"
+
+    @property
+    def provider_errors(self) -> dict[str, str]:
+        """Sanitized failures of individual providers from the last successful collection."""
+        return self.mirror.errors
 
     @property
     def status(self) -> str:
@@ -274,6 +307,34 @@ class Source:
         self._window_changed = True
         self._send(("hours", hours))
 
+    def request_page(self, key: str, before: int, limit: int) -> int:
+        self._page_token += 1
+        self._page_pending.add(self._page_token)
+        while len(self._page_pending) > 16:  # bounded tracking: forgotten tokens then count as expired
+            self._page_pending.discard(min(self._page_pending))
+        self._send(("page", self._page_token, key, before, limit))
+        return self._page_token
+
+    def take_page(self, token: int) -> dict | None:
+        """The answered page, None while the reader still works on it, or an error once the token is gone."""
+        if isinstance(token, bool) or not isinstance(token, int):
+            return {"error": "invalid"}
+        page = self._pages.pop(token, None)
+        if page is not None:
+            return page
+        if token in self._page_pending:
+            return None
+        return {"error": "expired" if 0 < token <= self._page_token else "invalid"}
+
+    def _store_page(self, page) -> None:
+        if not isinstance(page, dict) or isinstance(page.get("token"), bool) or \
+                not isinstance(page.get("token"), int):
+            return
+        self._pages[page["token"]] = page
+        self._page_pending.discard(page["token"])
+        while len(self._pages) > 16:  # evicted pages drop their token; taking it later reports an expired page
+            self._pages.pop(next(iter(self._pages)))
+
     def _windowed(self, runs: list[Run]) -> list[Run]:
         """Show only the window asked for last. The reader answers a change on its next pass, so a payload built
         for the previous window may still arrive first; live runs stay whatever their age, as documented."""
@@ -289,6 +350,8 @@ class Source:
                     payload = self._conn.recv()
                     if payload.get("error"):
                         self.error = payload["error"]
+                    elif "page" in payload:
+                        self._store_page(payload["page"])
                     elif "runs" in payload:
                         runs = self._windowed(self.mirror.apply(payload))
                         self.last_update = time.monotonic()
@@ -303,6 +366,8 @@ class Source:
                     break
                 if payload.get("error"):
                     self.error = payload["error"]
+                elif "page" in payload:
+                    self._store_page(payload["page"])
                 elif "runs" in payload:
                     runs = self._windowed(self.mirror.apply(payload))
                     self.last_update = time.monotonic()

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 MAX_EVENTS = 3000
+MAX_QUARANTINE = 20  # discarded records kept as metadata, newest last
 _GENERATION = itertools.count(1)  # identifies one Session object for the lifetime of the process
 # A session without a matched process still counts as live if it wrote this recently.
 RECENT_SECS = 120
@@ -114,6 +115,10 @@ class Session:
         self.last_agent_message = ""
         self.events: deque[Event] = deque(maxlen=MAX_EVENTS)
         self.events_total = 0
+        self.records_total = 0  # non-empty, non-skippable records attempted in this stream
+        self.discarded = 0  # records with invalid JSON or a handle() exception
+        # (record number, kind, exception name, bytes): never the raw line or the exception message.
+        self.quarantine: deque[tuple[int, str, str, int]] = deque(maxlen=MAX_QUARANTINE)
         self.messages: list[tuple[float | None, str]] = []
         self.files: dict[str, list] = {}  # path -> [kind, count, ts, plus, minus]
         self.n_cmds = 0
@@ -275,15 +280,19 @@ class Session:
         for raw in lines:
             if not raw.strip() or self._skippable(raw):
                 continue
+            self.records_total += 1
             try:
                 obj = json.loads(raw.decode("utf-8", "replace"))
-            except ValueError:
+            except ValueError as exc:
+                self.discarded += 1
+                self.quarantine.append((self.records_total, "json", type(exc).__name__, len(raw)))
                 continue
             if isinstance(obj, dict):
                 try:
                     self.handle(obj)
-                except Exception:  # a malformed record must not stop the session
-                    pass
+                except Exception as exc:  # a malformed record must not stop the session
+                    self.discarded += 1
+                    self.quarantine.append((self.records_total, "handle", type(exc).__name__, len(raw)))
 
     def _skippable(self, raw: bytes) -> bool:
         head = raw[:200]

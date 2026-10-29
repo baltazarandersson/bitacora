@@ -24,9 +24,10 @@ from bitacora.store import capped_hours
 from bitacora.themes import DEFAULT_THEME, THEMES, descriptors
 from bitacora.util import fmt_dur, fmt_tokens, same_path
 from bitacora.views import DEFAULT_VIEW, all_views, counts
-from bitacora.worker import Source
+from bitacora.worker import PAGE_LIMIT, Source
 
 READ_LIMIT = 128_000
+ASPECTS = ("messages", "events", "files", "log", "result", "info")
 DOCUMENT_FILES = {".md", ".markdown", ".txt", ".log", ".out", ".json", ".jsonl", ".csv", ".tsv",
                   ".yaml", ".yml", ".toml", ".rst"}
 
@@ -115,6 +116,8 @@ class DesktopService:
         self._source = source or Source(runtime.config.hours, scan_procs=runtime.demo_root is None)
         self._runs: list[Run] = []
         self._revision = 0
+        self._aspect: dict[str, dict[str, int]] = {}
+        self._aspect_sig: dict[str, dict[str, tuple]] = {}
         self._previous: dict[str, str] = {}
         self._notices = []
         self._confirmations: dict[str, tuple[str, int, float, float]] = {}
@@ -178,6 +181,7 @@ class DesktopService:
         if incoming is None:
             return
         self._runs = incoming
+        self._update_aspects(incoming)
         self._revision += 1
         statuses = {}
         for run in incoming:
@@ -194,6 +198,49 @@ class DesktopService:
                 elif status in ("failed", "limited", "stopped"):
                     self._notices.append({"kind": "stopped", "text": t("n_stopped", label=run.label)})
         self._previous = statuses
+
+    @staticmethod
+    def _content_sigs(run):
+        s = run.session
+        if s is None:
+            return {"messages": (None,), "events": (None,), "files": (None,)}
+        last = s.messages[-1] if s.messages else None
+        return {
+            # Length alone freezes once the mirror caps the window; the tail still changes on append.
+            "messages": (s.gen, len(s.messages), last[0] if last else None, len(last[1]) if last else 0),
+            "events": (s.gen, s.events_total),
+            "files": tuple(sorted((path, tuple(values)) for path, values in s.files.items())),
+        }
+
+    def _update_aspects(self, runs):
+        live = {run.key for run in runs}
+        for key in list(self._aspect):
+            if key not in live:
+                self._aspect.pop(key, None)
+                self._aspect_sig.pop(key, None)
+        for run in runs:
+            counts = self._aspect.setdefault(run.key, dict.fromkeys(ASPECTS, 0))
+            sigs = self._aspect_sig.setdefault(run.key, {})
+            for aspect, sig in self._content_sigs(run).items():
+                if sigs.get(aspect) != sig:
+                    sigs[aspect] = sig
+                    counts[aspect] += 1
+
+    @staticmethod
+    def _stat_sig(path):
+        try:
+            st = os.stat(path)
+            return (st.st_size, st.st_mtime_ns)
+        except (OSError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _transcript_sig(session):
+        """A result with no file shows the agent's last message: its revision follows the transcript."""
+        if session is None:
+            return None
+        last = session.messages[-1] if session.messages else None
+        return (session.gen, len(session.messages), last, session.last_agent_message)
 
     def _path(self, path):
         if path is None:
@@ -219,7 +266,7 @@ class DesktopService:
             return False
 
     def _can_stop(self, run):
-        if self._closed or self._source.health != "ready" or not run.proc or not run.session:
+        if self._closed or self._source.health not in ("ready", "partial") or not run.proc or not run.session:
             return False
         if run.proc.session_id and run.session.session_id:
             return run.proc.session_id == run.session.session_id
@@ -289,10 +336,14 @@ class DesktopService:
                                for v in self._views}
             age = time.monotonic() - self._source.last_update if self._source.last_update is not None else None
             notices, self._notices = self._notices, []
+            errors = [] if self._closed else [
+                {"provider": provider, "message": message}
+                for provider, message in sorted(self._source.provider_errors.items())
+            ]
             return {"revision": self._revision,
                     "reader": {"state": "error" if self._closed else self._source.health,
                                "error": t("desktop_reader_closed") if self._closed else self._source.error,
-                               "age": age},
+                               "age": age, "errors": errors},
                     "runs": [self._summary(r) for r in runs], "counts": totals,
                     "quotas": self._source.mirror.quotas, "notices": notices}
 
@@ -302,7 +353,7 @@ class DesktopService:
         self._poll()
         return next((r for r in self._runs if r.key == key and self._view().matches(r)), None)
 
-    def _read(self, path, *, tail=False):
+    def _read(self, path, *, tail=False, what=None):
         out = {"path": self._path(path), "text": "", "available": False}
         if not path:
             return out
@@ -317,21 +368,20 @@ class DesktopService:
                 note = t("desktop_file_tail" if tail else "desktop_file_head")
                 out["text"] = note + "\n\n" + out["text"]
         except OSError:
-            out["error"] = t("n_no_file", what=t("desktop_tab_log" if tail else "desktop_tab_result"))
+            noun = what or ("log" if tail else "result")
+            out["error"] = t("n_no_file", what=t(f"desktop_tab_{noun}"))
         return out
 
-    def get_detail(self, key):
+    def get_detail(self, key, known=None):
+        if known is not None and (not isinstance(known, dict) or set(known) - set(ASPECTS) or
+                                  any(isinstance(value, bool) or not isinstance(value, int)
+                                      for value in known.values())):
+            return {"error": t("desktop_invalid_request")}
         with self._lock:
             run = self._run(key)
             if run is None:
                 return {"error": t("desktop_detail_missing")}
             s = run.session
-            result = self._read(run.out)
-            if not result["available"] and s:
-                latest = s.last_agent_message or (s.messages[-1][1] if s.messages else "")
-                if latest:
-                    result["text"] = latest
-                    result["fallback"] = True
             basis = _usage_basis(s, run.provider)
             ctx_used = _context_tokens(s)
             ctx_window, context_window_assumed = _context_window(run, s)
@@ -377,13 +427,75 @@ class DesktopService:
                       ("inf_resume", self._resume(run) or "-")]
             if s and s.open_questions:
                 fields.insert(1, ("inf_question", " | ".join(s.open_questions.values())))
-            return {"run": self._summary(run), "events": [asdict(e) for e in s.events] if s else [],
-                    "events_total": s.events_total if s else 0,
-                    "messages": [{"ts": ts, "text": text} for ts, text in s.messages] if s else [],
-                    "files": [{"path": self._path(p), "kind": v[0], "count": v[1], "ts": v[2],
-                               "plus": v[3], "minus": v[4]} for p, v in s.files.items()] if s else [],
-                    "log": self._read(run.log, tail=True), "result": result, "resume": self._resume(run),
-                    "info": [{"label": t(label), "value": str(value)} for label, value in fields]}
+            counts = self._aspect.setdefault(run.key, dict.fromkeys(ASPECTS, 0))
+            sigs = self._aspect_sig.setdefault(run.key, {})
+            result_sig = self._stat_sig(run.out)
+            if result_sig is None:  # no file: the fallback mirrors the transcript; a file appearing replaces this
+                result_sig = ("transcript", self._transcript_sig(s))
+            for aspect, sig in (("log", self._stat_sig(run.log)), ("result", result_sig)):
+                if sigs.get(aspect) != sig:
+                    sigs[aspect] = sig
+                    counts[aspect] += 1
+            # Freshness (ages, durations) keeps its own clock instead of riding on content changes.
+            info_sig = (run.status, s.gen if s else None, s.tokens if s else None, ctx_used,
+                        run.model, run.effort, run.sandbox, s.events_total if s else 0,
+                        tuple(s.open_questions.items()) if s else (),
+                        run.proc.pid if run.proc else None, run.cwd, run.out, run.log,
+                        int(time.time() // 4) if run.live else 0)
+            if sigs.get("info") != info_sig:
+                sigs["info"] = info_sig
+                counts["info"] += 1
+            revisions = {aspect: counts[aspect] for aspect in ASPECTS}
+            fresh = {aspect: known is None or known.get(aspect) != revisions[aspect]
+                     for aspect in ASPECTS}
+            out = {"run": self._summary(run), "revisions": revisions, "resume": self._resume(run)}
+            if fresh["messages"]:
+                out["messages"] = [{"ts": ts, "text": text} for ts, text in s.messages] if s else []
+                total = getattr(s, "messages_total", len(s.messages)) if s else 0
+                out["messages_offset"] = max(0, total - len(s.messages)) if s else 0
+            if fresh["events"]:
+                out["events"] = [asdict(e) for e in s.events] if s else []
+                out["events_total"] = s.events_total if s else 0
+            if fresh["files"]:
+                out["files"] = [{"path": self._path(p), "kind": v[0], "count": v[1], "ts": v[2],
+                                 "plus": v[3], "minus": v[4]} for p, v in s.files.items()] if s else []
+            if fresh["log"]:
+                out["log"] = self._read(run.log, tail=True, what="log")
+            if fresh["result"]:
+                result = self._read(run.out, tail=True, what="result")
+                if not result["available"] and s:
+                    latest = s.last_agent_message or (s.messages[-1][1] if s.messages else "")
+                    if latest:
+                        result["text"] = latest
+                        result["fallback"] = True
+                out["result"] = result
+            if fresh["info"]:
+                out["info"] = [{"label": t(label), "value": str(value)} for label, value in fields]
+            return out
+
+    def get_detail_page(self, key, before, limit):
+        with self._lock:
+            run = self._run(key)
+            if run is None:
+                return {"error": t("desktop_detail_missing")}
+            if isinstance(before, bool) or not isinstance(before, int) or before < 0 or \
+                    isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= PAGE_LIMIT:
+                return {"error": t("desktop_invalid_request")}
+            if not hasattr(self._source, "request_page"):
+                return {"error": t("desktop_invalid_request")}
+            return {"token": self._source.request_page(run.key, before, limit)}
+
+    def get_page(self, token):
+        if isinstance(token, bool) or not isinstance(token, int) or token < 0:
+            return {"error": t("desktop_invalid_request")}
+        with self._lock:
+            self._poll()
+            page = self._source.take_page(token) if hasattr(self._source, "take_page") else None
+        if page and page.get("error"):
+            key = {"missing": "desktop_detail_missing", "expired": "desktop_page_expired"}.get(
+                page["error"], "desktop_invalid_request")
+            return {"error": t(key)}
+        return page or {"pending": True}
 
     def save_preferences(self, patch):
         with self._lock:
@@ -468,12 +580,12 @@ class DesktopService:
             run = self._run(key)
             if not run or not self._can_stop(run) or run.proc.pid != pid or run.proc.create != created:
                 return {"ok": False, "message": t("desktop_process_changed")}
-            try:
-                procs.kill_tree(pid, expected_create=created)
-            except (psutil.Error, OSError, ValueError):
-                return {"ok": False, "message": t("desktop_process_changed")}
-            self._source.refresh()
-            return {"ok": True, "message": t("desktop_stop_sent")}
+        try:
+            procs.kill_tree(pid, expected_create=created)
+        except (psutil.Error, OSError, ValueError):
+            return {"ok": False, "message": t("desktop_process_changed")}
+        self._source.refresh()
+        return {"ok": True, "message": t("desktop_stop_sent")}
 
     def get_scene(self, columns):
         from bitacora.ui.masthead import SkyClock

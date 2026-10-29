@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.2.0 (2026-10-29)
+
+### Reliability
+
+- Keep each provider's last good data when a scan fails, name the failed providers in a partial-reader notice and keep working with what remains. Preserve provider histories across failures and restarts, and stop rescanning an empty Codex tree on every pass.
+- Validate the Codex checkpoint's path and file pattern, and rewrite it only when its contents change.
+- Freeze message values, bound log and result reads, and serve older messages from the reader through expiring page tokens instead of unbounded transfers.
+- Validate the history window (`--hours`) as a positive number capped at 72 hours, and finish process termination without holding the collection lock.
+- Show Result from the end of the file in both interfaces, with the same bounded-read note. Refresh Info when questions, process identity, folder or result/log paths change.
+
+### Desktop
+
+- Request detail aspects by revision: unchanged aspects are omitted, and older messages load page by page with a bounded DOM.
+- Keep Load older usable across consecutive pages, merge message offsets correctly after deltas and resets, and refresh server-provided text after a language change.
+- Use declared provider capabilities to decide which prefixes to scan and when a resume command exists.
+- Show the partial-reader banner without hiding the last good data or the actions that do not depend on the failed provider.
+
+### Performance
+
+- Reuse scene colors and styles, locate the beam with a bisect over precomputed angles, skip empty rows and cache the beacon gradient by level. Rendered frames stay byte-identical while frame time drops 16–21% (about 22% at 200×50).
+- Add `scripts/bench_home.py` for repeatable frame, segment and desktop-payload measurements, and golden frame hashes that guard the visual output.
+
+### Diagnostics
+
+- Add `bitacora --diagnostics`: local JSON counters, latencies, memory and bounded quarantine metadata (record kind and exception class only). It includes no message text, commands, file paths or network access.
+
+### Documentation
+
+- Document the revisioned detail contract, message paging, partial reads and the desktop partial-reader banner; update both READMEs and the privacy note.
+
 ## 1.1.1 (2026-10-10)
 
 ### Documentation

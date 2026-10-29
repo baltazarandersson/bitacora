@@ -214,6 +214,10 @@ class BeaconRule(Widget):
         self.running = False
         self.asking = False
         self.t0 = time.monotonic()
+        self._beam_styles: dict[int, Style] = {}
+        self._beam_key: tuple[str, str] | None = None
+        self._muted_key: tuple[str, str] | None = None
+        self._muted: str = ""
 
     def on_mount(self) -> None:
         fps = default_scene_fps()
@@ -229,27 +233,54 @@ class BeaconRule(Widget):
         if self.running:
             self.refresh()
 
+    def _muted_color(self) -> str:
+        key = (R.BG, R.FG)
+        if key != self._muted_key:
+            self._muted_key, self._muted = key, rule_color(*key)
+        return self._muted
+
+    def _beam_style(self, level: int, muted: str, beam: str) -> Style:
+        """One Style per quantized level: the beam moves every frame but only touches a handful of levels."""
+        key = (muted, beam)
+        if key != self._beam_key:  # a theme change invalidates the colour cache
+            self._beam_key = key
+            self._beam_styles.clear()
+        style = self._beam_styles.get(level)
+        if style is None:
+            style = self._beam_styles[level] = Style(color=mix(muted, beam, level / MAX_LEVEL))
+        return style
+
     def render_line(self, y: int) -> Strip:
         width = self.size.width
         if y or width <= 0:
             return Strip.blank(width, self.rich_style)
-        muted = rule_color(R.BG, R.FG)
+        muted = self._muted_color()
         if not self.running:
             return Strip([Segment("─" * width, Style(color=muted))]).crop(0, width)
         variables = self.app.get_css_variables()
         beam = variables["warning" if self.asking else "accent"]
         span = width + 2 * self.GLOW
         pos = ((time.monotonic() - self.t0) / self.PASS) % 1 * span - self.GLOW
-        segments: list[Segment] = []
-        run, current = "", None
-        for x in range(width):
-            strength = max(0.0, 1 - abs(x - pos) / self.GLOW)
-            style = Style(color=mix(muted, beam, strength))
-            if style != current and run:
-                segments.append(Segment(run, current))
-                run = ""
-            current = style
-            run += "─"
-        if run:
-            segments.append(Segment(run, current))
+        segments = [Segment(text, self._beam_style(level, muted, beam))
+                    for text, level in beam_strip(width, pos, self.GLOW)]
         return Strip(segments).crop(0, width)
+
+
+MAX_LEVEL = 256  # the beam is quantized to 1/256: at most one step of difference in any colour channel
+
+
+def beam_strip(width: int, pos: float, glow: int = BeaconRule.GLOW) -> list[tuple[str, int]]:
+    """The bar as (text, level) runs: a pure strip, testable without a widget. Level goes from 0 to MAX_LEVEL."""
+    runs: list[tuple[str, int]] = []
+    run, current = "", -1
+    for x in range(width):
+        strength = max(0.0, 1 - abs(x - pos) / glow)
+        level = round(strength * MAX_LEVEL)
+        if level != current and run:
+            runs.append((run, current))
+            run = ""
+        current = level
+        run += "─"
+    if run:
+        runs.append((run, current))
+    return runs

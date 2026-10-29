@@ -1,7 +1,12 @@
+import time
 from pathlib import Path
 
+import pytest
+
 from bitacora.collector import Collector
+from bitacora.model import ProcInfo, Session
 from bitacora.providers import Provider, all_providers
+from bitacora.providers.base import Capabilities
 from bitacora.store import Memory
 from bitacora.views import BUILTIN, all_views, counts, custom_view
 
@@ -151,6 +156,202 @@ def test_live_process_without_transcript_is_hidden_only_after_a_while():
     c = Collector([SilentProvider([fresh, old])], Memory(), hours=24, scan_procs=False)
     runs = c.collect()
     assert [r.proc.pid for r in runs] == [1]
+
+
+class RecordingSession(Session):
+    def __init__(self, path):
+        self.records = []
+        super().__init__(path)
+
+    def handle(self, obj):
+        self.records.append(obj)
+
+
+class SwitchProvider(Provider):
+    """A provider whose data and failures each test controls."""
+
+    def __init__(self, name, home, paths=(), procs_now=(), fail=(), quota=None):
+        self.name = name
+        self.label = name.title()
+        self.home_dir = Path(home)
+        self.paths = list(paths)
+        self.procs_now = list(procs_now)
+        self.fail = set(fail)
+        self.quota_value = quota
+        self.match_path = None
+
+    def home(self):
+        return self.home_dir
+
+    def available(self):
+        return True
+
+    def procs(self, _snap):
+        if "procs" in self.fail:
+            raise RuntimeError("SECRET procs at /private/session.jsonl")
+        return self.procs_now
+
+    def match(self, _pi, _claimed, _peers=()):
+        return self.match_path
+
+    def history(self, _since):
+        if "history" in self.fail:
+            raise RuntimeError("SECRET history at /private/session.jsonl")
+        return self.paths
+
+    def quota(self, _sessions):
+        if "quota" in self.fail:
+            raise RuntimeError("SECRET quota at /private/session.jsonl")
+        return self.quota_value
+
+
+def test_a_failing_provider_does_not_stop_the_cycle_and_recovers(tmp_path):
+    healthy_path = tmp_path / "healthy.jsonl"
+    healthy_path.write_text('{"value": 1}\n', encoding="utf-8")
+    bad = SwitchProvider("bad", tmp_path, fail={"procs"})
+    good = SwitchProvider("good", tmp_path, paths=[healthy_path])
+    bad.session_cls = good.session_cls = RecordingSession
+    collector = Collector([bad, good], Memory(tmp_path / "sessions.json"), hours=24, scan_procs=False)
+
+    runs = collector.collect()
+    assert [run.provider for run in runs] == ["good"]
+    assert [run.label for run in runs] == ["healthy"]
+    assert collector.errors == {"bad": "RuntimeError"}
+    assert "SECRET" not in collector.errors["bad"]
+
+    bad.fail.clear()
+    assert [run.provider for run in collector.collect()] == ["good"]
+    assert collector.errors == {}
+
+
+def test_processes_capability_controls_snapshot_names_and_live_runs(tmp_path, monkeypatch):
+    requested = []
+
+    def fake_snapshot(names):
+        requested.append(tuple(names))
+        return []
+
+    monkeypatch.setattr("bitacora.collector.procs.snapshot", fake_snapshot)
+    now = time.time()
+    scanning = SwitchProvider("codex", tmp_path,
+                              procs_now=[ProcInfo("codex", 42, now - 30, ["codexbin"])])
+    scanning.process_names = ("codexbin",)
+    scanning.capabilities = Capabilities(processes=True)
+    skipped = SwitchProvider("claude", tmp_path,
+                             procs_now=[ProcInfo("claude", 43, now - 30, ["claudebin"])])
+    skipped.process_names = ("claudebin",)
+    skipped.capabilities = Capabilities(processes=False)
+
+    def must_not_scan(_snap):
+        pytest.fail("a provider without processes must not be asked for them")
+
+    skipped.procs = must_not_scan
+    collector = Collector([scanning, skipped], Memory(tmp_path / "sessions.json"), hours=24)
+
+    runs = collector.collect()
+    assert requested == [("codexbin",)]  # the disabled provider's names never reach the snapshot
+    assert [(run.key, run.provider) for run in runs] == [("codex:pid42", "codex")]
+    assert runs[0].live
+    assert collector.errors == {}
+
+
+def test_history_failure_keeps_live_runs_and_claimed_sessions(tmp_path):
+    live_path = tmp_path / "live.jsonl"
+    live_path.write_text('{"value": 1}\n', encoding="utf-8")
+    provider = SwitchProvider("codex", tmp_path,
+                              procs_now=[ProcInfo("codex", 42, time.time() - 30, ["codex"])],
+                              fail={"history"})
+    provider.session_cls = RecordingSession
+    provider.match_path = live_path
+    collector = Collector([provider], Memory(tmp_path / "sessions.json"), hours=24, scan_procs=False)
+
+    runs = collector.collect()
+    assert [run.proc.pid for run in runs] == [42]
+    assert collector.sessions[live_path].records == [{"value": 1}]
+    assert collector.errors == {"codex": "RuntimeError"}
+
+
+def test_quota_failure_keeps_the_last_known_quota(tmp_path):
+    quota = {"used_percent": 10.0, "as_of": 1.0}
+    provider = SwitchProvider("codex", tmp_path, quota=quota)
+    collector = Collector([provider], Memory(tmp_path / "sessions.json"), hours=24, scan_procs=False)
+    collector.collect()
+    assert collector.quotas == {"codex": quota}
+
+    provider.fail.add("quota")
+    collector.collect()
+    assert collector.quotas == {"codex": quota}
+    assert collector.errors == {"codex": "RuntimeError"}
+
+
+def session_cls_for(provider_name):
+    """A recording session that identifies its provider, as real provider sessions do."""
+    return type(f"{provider_name.title()}RecordingSession", (RecordingSession,), {"provider": provider_name})
+
+
+def test_history_failure_keeps_the_last_good_runs(tmp_path):
+    history_path = tmp_path / "history.jsonl"
+    history_path.write_text('{"value": 1}\n', encoding="utf-8")
+    other_path = tmp_path / "other.jsonl"
+    other_path.write_text('{"value": 2}\n', encoding="utf-8")
+    flaky = SwitchProvider("codex", tmp_path, paths=[history_path])
+    steady = SwitchProvider("claude", tmp_path, paths=[other_path])
+    flaky.session_cls = session_cls_for("codex")
+    steady.session_cls = session_cls_for("claude")
+    collector = Collector([flaky, steady], Memory(tmp_path / "sessions.json"), hours=24, scan_procs=False)
+
+    assert {(run.provider, run.label) for run in collector.collect()} == {("codex", "history"),
+                                                                         ("claude", "other")}
+    assert collector.errors == {}
+
+    flaky.fail.add("history")
+    runs = collector.collect()
+    # The failed provider keeps its last good run and session; the healthy provider is untouched.
+    assert {(run.provider, run.label) for run in runs} == {("codex", "history"), ("claude", "other")}
+    assert history_path in collector.sessions and other_path in collector.sessions
+    assert collector.errors == {"codex": "RuntimeError"}
+
+
+def test_a_failing_process_scan_keeps_the_last_live_run_without_duplicates(tmp_path):
+    live_path = tmp_path / "live.jsonl"
+    live_path.write_text('{"value": 1}\n', encoding="utf-8")
+    provider = SwitchProvider("codex", tmp_path,
+                              procs_now=[ProcInfo("codex", 42, time.time() - 30, ["codex"])])
+    provider.session_cls = session_cls_for("codex")
+    provider.match_path = live_path
+    collector = Collector([provider], Memory(tmp_path / "sessions.json"), hours=24, scan_procs=False)
+
+    first = collector.collect()
+    assert [run.key for run in first] == ["codex:pid42"] and first[0].live
+
+    provider.fail.add("history")  # a fresh live run and the cached one share a key: keep one row
+    second = collector.collect()
+    assert [run.key for run in second] == ["codex:pid42"] and second[0].live
+    assert second[0] is not first[0]
+
+    provider.fail.add("procs")  # nothing fresh this pass: the last good live run is retained
+    third = collector.collect()
+    assert [run.key for run in third] == ["codex:pid42"] and third[0].live
+    assert third[0] is first[0]
+    assert live_path in collector.sessions
+    assert collector.errors == {"codex": "RuntimeError"}
+
+
+def test_quota_failure_does_not_change_history_retention(tmp_path):
+    history_path = tmp_path / "history.jsonl"
+    history_path.write_text('{"value": 1}\n', encoding="utf-8")
+    quota = {"used_percent": 10.0, "as_of": 1.0}
+    provider = SwitchProvider("codex", tmp_path, paths=[history_path], quota=quota)
+    provider.session_cls = session_cls_for("codex")
+    collector = Collector([provider], Memory(tmp_path / "sessions.json"), hours=24, scan_procs=False)
+    assert [run.label for run in collector.collect()] == ["history"]
+
+    provider.paths.clear()  # the file aged out of the history window
+    provider.fail.add("quota")
+    assert collector.collect() == []
+    assert collector.sessions == {}  # a quota error alone does not keep stale sessions
+    assert collector.quotas == {"codex": quota}
+    assert collector.errors == {"codex": "RuntimeError"}
 
 
 def test_process_pid_reuse_invalidates_cached_transcript(tmp_path):

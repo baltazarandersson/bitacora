@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,11 +35,13 @@ class Proc:
 CANDIDATES = ("codex", "claude", "node", "bun")
 
 
-def snapshot() -> list[Proc]:
+def snapshot(names: Iterable[str] = CANDIDATES) -> list[Proc]:
+    """Processes whose executable starts with a declared prefix; the filter avoids slow per-process reads."""
+    prefixes = tuple(name.lower() for name in names if isinstance(name, str) and name) or CANDIDATES
     out = []
     for p in psutil.process_iter(["name"]):
         name = (p.info.get("name") or "").lower()
-        if not name.startswith(CANDIDATES):
+        if not name.startswith(prefixes):
             continue
         try:
             with p.oneshot():

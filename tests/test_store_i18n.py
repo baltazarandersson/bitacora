@@ -175,6 +175,63 @@ def test_migration_replaces_invalid_target_entry_before_cleanup(tmp_path):
     assert "sessions" not in json.loads(state_file.read_text(encoding="utf-8"))
 
 
+def test_memory_save_does_not_revert_a_key_another_instance_saved(tmp_path):
+    memory_file = tmp_path / "sessions.json"
+    memory_file.write_text(json.dumps({"codex:a": {"label": "A0"}}), encoding="utf-8")
+    first, second = Memory(memory_file), Memory(memory_file)
+
+    first.remember("codex:a", {"label": "A1"})
+    assert first.save()
+    second.remember("codex:b", {"label": "B"})
+    assert second.save()
+
+    assert json.loads(memory_file.read_text(encoding="utf-8")) == {
+        "codex:a": {"label": "A1"},
+        "codex:b": {"label": "B"},
+    }
+
+
+def test_memory_save_writes_its_changed_key_over_the_value_on_disk(tmp_path):
+    memory_file = tmp_path / "sessions.json"
+    memory_file.write_text(json.dumps({"codex:a": {"label": "A1"}}), encoding="utf-8")
+    memory = Memory(memory_file)
+    memory_file.write_text(json.dumps({"codex:a": {"label": "A2"}}), encoding="utf-8")  # another writer moves on
+
+    memory.remember("codex:a", {"label": "A3"})
+    assert memory.save()
+    assert json.loads(memory_file.read_text(encoding="utf-8"))["codex:a"] == {"label": "A3"}
+
+
+def test_memory_save_keeps_unmodified_keys_another_writer_saved(tmp_path):
+    memory_file = tmp_path / "sessions.json"
+    memory_file.write_text(json.dumps({"codex:a": {"label": "A0"}}), encoding="utf-8")
+    memory = Memory(memory_file)
+    memory_file.write_text(json.dumps({"codex:a": {"label": "A0"}, "codex:c": {"label": "C"}}),
+                           encoding="utf-8")
+
+    memory.remember("codex:b", {"label": "B"})
+    assert memory.save()
+    data = json.loads(memory_file.read_text(encoding="utf-8"))
+    assert data["codex:a"] == {"label": "A0"}
+    assert data["codex:b"] == {"label": "B"}
+    assert data["codex:c"] == {"label": "C"}
+    assert memory.session("codex:c") == {"label": "C"}
+
+
+def test_memory_save_without_changes_does_not_write(tmp_path, monkeypatch):
+    import bitacora.store as store
+
+    memory_file = tmp_path / "sessions.json"
+    memory_file.write_text(json.dumps({"codex:a": {"label": "A"}}), encoding="utf-8")
+    memory = Memory(memory_file)
+    memory.remember("codex:a", {"label": "A"})  # equal to the loaded entry, so not a change
+    writes = []
+    monkeypatch.setattr(store, "_atomic_write", lambda path, data: writes.append(path) or True)
+
+    assert memory.save()
+    assert writes == []
+
+
 def test_fresh_state_and_memory_do_not_create_files(tmp_path):
     state_file = tmp_path / "state.json"
     memory_file = tmp_path / "sessions.json"

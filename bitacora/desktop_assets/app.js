@@ -21,6 +21,7 @@
   const DEFAULT_FONT = 14;
   const MAX_EVENTS = 300; // activity rows kept in the DOM; older ones are counted, not drawn
   const MAX_MESSAGES = 200;
+  const MAX_PAGED_MESSAGES = 1200; // whole messages kept once older pages have been loaded
   const MAX_LOG_LINES = 3000;
   const MAX_FILES = 2000;
   const POLL_MS = 1000;
@@ -471,6 +472,14 @@
   }
 
   function relabelAll() {
+    // Server-rendered detail (info labels, log notes, result notes) was built in the previous language: drop it and
+    // ask again. At boot there is no detail yet, so there is nothing to invalidate.
+    if (S.selected && S.detail && S.detailKey === S.selected) {
+      S.detail = null;
+      S.detailState = "loading";
+      S.detailWarn = false;
+      requestDetail(0);
+    }
     relabelStatic();
     buildTabs();
     renderSettings();
@@ -903,6 +912,12 @@
       cls = "warn";
       text = t("desktop_reader_short_stale");
       banner = t("desktop_reader_stale", { age: fmtDur(r.age) });
+    } else if (r.state === "partial") {
+      cls = "warn";
+      const providers = (Array.isArray(r.errors) ? r.errors : [])
+        .map((error) => str(error && error.provider)).filter(Boolean).join(", ");
+      text = t("desktop_reader_short_partial");
+      banner = t("desktop_reader_partial", { providers: providers || "?" });
     } else if (num(r.age) !== null) {
       text = t("desktop_reader_ready", { age: fmtDur(r.age) });
     }
@@ -1740,11 +1755,12 @@
     }
     const key = S.selected;
     if (!key) return;
+    const known = S.detail && S.detailKey === key && S.detail.revisions ? S.detail.revisions : null;
     detailBusy = true;
     let res;
     let failed = false;
     try {
-      res = await call("get_detail", key);
+      res = await call("get_detail", key, known);
     } catch (e) {
       failed = true;
       res = str(e && e.message ? e.message : e);
@@ -1771,7 +1787,35 @@
       S.detailError = str(res.error);
       S.detailWarn = false;
     } else {
-      S.detail = res;
+      const prev = S.detail && S.detailKey === key ? S.detail : null;
+      if (!prev || !prev.revisions || !res.revisions) {
+        S.detail = res;
+      } else {
+        const merged = Object.assign({}, prev);
+        for (const aspect of ["run", "revisions", "resume", "messages", "events", "events_total",
+                              "files", "log", "result", "info"]) {
+          if (Object.prototype.hasOwnProperty.call(res, aspect)) merged[aspect] = res[aspect];
+        }
+        // A paged cache is older than the mirror window; append only what the new window adds.
+        if (prev.messages_paged && Array.isArray(res.messages) && num(res.messages_offset) !== null) {
+          const newOffset = res.messages_offset;
+          const prevOffset = num(prev.messages_offset) !== null ? prev.messages_offset : 0;
+          const prevEnd = prevOffset + (Array.isArray(prev.messages) ? prev.messages.length : 0);
+          if (newOffset < prevOffset || newOffset > prevEnd || newOffset + res.messages.length < prevEnd) {
+            // Reset or gap: the mirror window is authoritative again, with its own cursor.
+            merged.messages_paged = false;
+            merged.messages_offset = newOffset;
+          } else {
+            const keep = res.messages.slice(Math.max(0, prevEnd - newOffset));
+            merged.messages = (Array.isArray(prev.messages) ? prev.messages : []).concat(keep);
+            merged.messages_offset = prevOffset; // the cache still starts at the page it was paged down to
+          }
+        } else if (!prev.messages_paged && Object.prototype.hasOwnProperty.call(res, "messages_offset")) {
+          // Unpaged delta: the window moved, so its cursor must move with it.
+          merged.messages_offset = res.messages_offset;
+        }
+        S.detail = merged;
+      }
       S.detailKey = key;
       S.detailState = "ok";
       S.detailWarn = false;
@@ -1779,6 +1823,57 @@
     renderSwitches();
     renderActivePane(false);
     renderSelected();
+  }
+
+  let olderBusy = false;
+
+  async function loadOlderMessages() {
+    const key = S.selected;
+    if (!key || olderBusy || !S.detail || S.detailKey !== key) return;
+    const before = num(S.detail.messages_offset);
+    if (before === null || before <= 0) return;
+    olderBusy = true;
+    const pane = $("pane-msg");
+    const bottom = pane.scrollHeight - pane.scrollTop;
+    try {
+      const asked = await call("get_detail_page", key, before, 200);
+      if (!asked || asked.error || num(asked.token) === null) {
+        throw new Error(asked && asked.error ? asked.error : t("desktop_bridge_error"));
+      }
+      let page = null;
+      for (let i = 0; i < 40 && !page; i++) {
+        const res = await call("get_page", asked.token);
+        if (res && res.error) throw new Error(res.error);
+        if (res && !res.pending) page = res;
+        else await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+      if (page && S.selected === key && S.detail) {
+        const older = Array.isArray(page.messages) ? page.messages.filter((m) => m && typeof m === "object") : [];
+        let messages = older.concat(Array.isArray(S.detail.messages) ? S.detail.messages : []);
+        let offset = num(page.next) === null ? 0 : page.next;
+        const dropped = Math.max(0, messages.length - MAX_PAGED_MESSAGES);
+        if (dropped) {
+          messages = messages.slice(dropped); // keep the newest ones; the dropped older pages can be asked for again
+          offset += dropped;
+        }
+        S.detail.messages = messages;
+        S.detail.messages_offset = offset;
+        S.detail.messages_paged = true;
+      }
+    } catch (e) {
+      toast(str(e && e.message ? e.message : t("desktop_bridge_error")));
+    } finally {
+      olderBusy = false;
+    }
+    // Repaint after clearing the flag, so the button comes back enabled even when nothing new arrived.
+    if (S.selected === key && S.detail) {
+      S.paneSig.msg = "";
+      renderActivePane(false);
+      if (S.tab === "msg") {
+        const fresh = $("pane-msg");
+        fresh.scrollTop = Math.max(0, fresh.scrollHeight - bottom);
+      }
+    }
   }
 
   function resetPanes() {
@@ -2023,7 +2118,8 @@
   // ---- messages
   function renderMessages(pane, d) {
     const msgs = Array.isArray(d.messages) ? d.messages.filter((m) => m && typeof m === "object") : [];
-    const sig = [S.selected, S.plain, S.lang, msgs.length, JSON.stringify(msgs[msgs.length - 1] || null)].join("\u0000");
+    const sig = [S.selected, S.plain, S.lang, msgs.length, d.messages_offset, d.messages_paged,
+                 JSON.stringify(msgs[0] || null), JSON.stringify(msgs[msgs.length - 1] || null)].join("\u0000");
     if (S.paneSig.msg === sig) return false;
     S.paneSig.msg = sig;
     rebuild(pane, () => {
@@ -2033,7 +2129,14 @@
         pane.appendChild(n);
         return;
       }
-      const cut = Math.max(0, msgs.length - MAX_MESSAGES);
+      if (num(d.messages_offset) !== null && d.messages_offset > 0) {
+        const older = el("button", "btn ghost load-older", t("desktop_load_older"));
+        older.type = "button";
+        older.disabled = olderBusy;
+        older.addEventListener("click", loadOlderMessages);
+        pane.appendChild(older);
+      }
+      const cut = d.messages_paged ? 0 : Math.max(0, msgs.length - MAX_MESSAGES);
       if (cut) pane.appendChild(el("div", "ev-earlier", t("desktop_earlier_messages", { n: cut })));
       for (const m of msgs.slice(cut)) {
         const art = el("article", "msg");

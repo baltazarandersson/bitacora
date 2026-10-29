@@ -274,6 +274,7 @@ class Memory(_JsonFile):
     def __init__(self, path: Path | None = None):
         path = path or state_path().with_name("sessions.json")
         super().__init__(path)
+        self._changed: set[str] = set()
         self.legacy_path = path.with_name("state.json")
         self._legacy_sessions = _read_dict(self.legacy_path).get("sessions")
         if isinstance(self._legacy_sessions, dict):
@@ -284,11 +285,13 @@ class Memory(_JsonFile):
                 if not isinstance(current, dict):
                     self.data[key] = dict(entry)
                     self.dirty = True
+                    self._changed.add(key)
                 else:
                     for field, value in entry.items():
                         if field not in current:
                             current[field] = value
                             self.dirty = True
+                            self._changed.add(key)
 
     def session(self, key: str) -> dict:
         entry = self.data.get(key)
@@ -298,18 +301,24 @@ class Memory(_JsonFile):
         if self.data.get(key) != entry:
             self.data[key] = entry
             self.dirty = True
+            self._changed.add(key)
 
     def save(self) -> bool:
         if self.dirty:
             try:
                 with _file_lock(self.path):
                     data = _read_dict(self.path)
-                    data.update(self.data)
+                    for key in self._changed:
+                        if key in self.data:
+                            data[key] = self.data[key]
+                        else:
+                            data.pop(key, None)
                     if not _atomic_write(self.path, data):
                         return False  # The old state.json remains the recoverable source until this succeeds.
             except OSError:
                 return False
             self.data = data
+            self._changed.clear()
             self.dirty = False
 
         if not isinstance(self._legacy_sessions, dict):

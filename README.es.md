@@ -35,9 +35,9 @@ Para probarlo sin tener ningún agente instalado:
 uvx bitacora --demo
 ```
 
-El build de Windows de 1.1 distribuye un único ejecutable público, `bitacora.exe`, que abre la app de escritorio sin Python ni consola. Puedes descargarlo desde la [última página de releases](https://github.com/baltazarandersson/bitacora/releases/latest). Requiere Microsoft Edge WebView2 Runtime. No está firmado, así que SmartScreen podría avisarte la primera vez.
+El build de Windows de 1.2 distribuye un único ejecutable público, `bitacora.exe`, que abre la app de escritorio sin Python ni consola. Puedes descargarlo desde la [última página de releases](https://github.com/baltazarandersson/bitacora/releases/latest). Requiere Microsoft Edge WebView2 Runtime. No está firmado, así que SmartScreen podría avisarte la primera vez.
 
-Si instalas con Python, agrega `pip install "bitacora[window]"` y ejecuta `bitacora --window`. El escritorio de 1.1 apunta a Windows; la terminal sigue disponible en los tres sistemas.
+Si instalas con Python, agrega `pip install "bitacora[window]"` y ejecuta `bitacora --window`. El escritorio de 1.2 apunta a Windows; la terminal sigue disponible en los tres sistemas.
 
 ## Qué muestra
 
@@ -60,6 +60,7 @@ bitacora --hours 72           # una ventana de historial más larga
 bitacora --lang en            # interfaz en inglés
 bitacora --window             # app de escritorio Windows (dependencias opcionales)
 bitacora --window --demo      # app de escritorio con sesiones generadas
+bitacora --diagnostics        # contadores, latencias y memoria locales en JSON, y sale
 ```
 
 ![Interfaz de terminal con sesiones generadas de la demo](https://raw.githubusercontent.com/baltazarandersson/bitacora/main/docs/screenshot-es.svg)
@@ -137,11 +138,11 @@ Ambas interfaces leen las sesiones en un proceso aparte. La app de escritorio us
 
 ## Privacidad
 
-Todo queda en tu máquina. Bitácora no hace pedidos a servicios externos. La interfaz de escritorio y sus recursos se cargan localmente, sin servidor de aplicación HTTP ni WebSocket. Nunca escribe en los archivos de los agentes. Detener un agente requiere confirmación y verifica que la identidad del proceso siga coincidiendo. Sus archivos guardan tus preferencias, nombres de sesiones, rutas y líneas de comandos observadas; `bitacora --paths` te muestra dónde.
+Todo queda en tu máquina. Bitácora no hace pedidos a servicios externos. `bitacora --diagnostics` imprime contadores agregados, latencias y uso de memoria de la máquina local y sale; no incluye texto de mensajes, comandos ni rutas, y no envía nada por la red. La interfaz de escritorio y sus recursos se cargan localmente, sin servidor de aplicación HTTP ni WebSocket. Nunca escribe en los archivos de los agentes. Detener un agente requiere confirmación y verifica que la identidad del proceso siga coincidiendo. Sus archivos guardan tus preferencias, nombres de sesiones, rutas y líneas de comandos observadas; `bitacora --paths` te muestra dónde.
 ## Límites
 
 - Ninguno de los dos formatos está documentado, y los dos cambian entre versiones. Esta versión se probó con Codex CLI 0.161 y Claude Code 2.1.
-- La matriz de CI cubre la terminal en Windows, Linux y macOS con Python 3.11 y 3.13. El build de Windows también tiene una prueba de arranque de la app empaquetada con sesiones generadas. El escritorio en Linux/macOS queda fuera del soporte de 1.1.
+- La matriz de CI cubre la terminal en Windows, Linux y macOS con Python 3.11 y 3.13. El build de Windows también tiene una prueba de arranque de la app empaquetada con sesiones generadas. El escritorio en Linux/macOS queda fuera del soporte de 1.2.
 - El razonamiento se guarda cifrado o no se guarda, así que la actividad muestra cuánto pensó el agente y no qué pensó (Codex incluye resúmenes si `model_reasoning_summary` está activo).
 - La ventana de contexto de Claude Code se infiere de los IDs de modelo conocidos y se marca como supuesta en Detalles. Los modelos desconocidos muestran la cantidad de tokens de contexto en vez de un porcentaje.
 - Las sesiones de subagentes todavía no se agrupan bajo su sesión madre.
