@@ -11,13 +11,13 @@ import os
 import queue
 import threading
 import time
-from dataclasses import fields
+from dataclasses import asdict, fields
 from pathlib import Path
 
 from bitacora.collector import Collector
 from bitacora.model import MAX_EVENTS, Event, ProcInfo, Run, Session
 from bitacora.providers import all_providers
-from bitacora.store import Memory, state_path
+from bitacora.store import Memory, load_config, state_path
 from bitacora.util import _format_error
 
 TAIL = 400  # events sent for a session the UI has not seen yet
@@ -36,18 +36,19 @@ class Packer:
     """Turns a full collection into the changes since the previous one."""
 
     def __init__(self) -> None:
-        # path -> (session generation, events sent, messages sent, snapshots of events already sent).
-        self.sent: dict[Path, tuple[int, int, int, dict[int, tuple]]] = {}
+        # (provider, run key) -> (session generation, events sent, messages sent, snapshots of events already sent).
+        self.sent: dict[tuple[str, str], tuple[int, int, int, dict[int, tuple]]] = {}
 
-    def pack(self, runs: list[Run], quotas: dict, errors: dict | None = None) -> dict:
+    def pack(self, runs: list[Run], quotas: dict, errors: dict | None = None, health: dict | None = None) -> dict:
         out = []
-        live_paths = set()
+        live: set[tuple[str, str]] = set()
         for r in runs:
             s = r.session
             sd = None
             if s is not None:
-                live_paths.add(s.path)
-                ident, ev_sent, msg_sent, signatures = self.sent.get(s.path, (0, 0, 0, {}))
+                identity = (r.provider, r.key)
+                live.add(identity)
+                ident, ev_sent, msg_sent, signatures = self.sent.get(identity, (0, 0, 0, {}))
                 reset = ident != s.gen or s.events_total < ev_sent
                 if reset:
                     ev_sent = msg_sent = 0
@@ -58,7 +59,7 @@ class Packer:
                     (e.seq in signatures and _event_signature(e) != signatures[e.seq])
                 ]
                 messages = s.messages[msg_sent:] if not reset else s.messages[-MESSAGES:]
-                sd = {"path": str(s.path), "provider": s.provider, "reset": reset,
+                sd = {"path": str(s.path) if s.path is not None else None, "provider": s.provider, "reset": reset,
                       "attrs": {k: getattr(s, k) for k in SCALARS}, "events": events, "messages": messages,
                       "messages_total": len(s.messages),
                       "files": dict(s.files), "open_questions": dict(s.open_questions),
@@ -68,11 +69,19 @@ class Packer:
                     sent_now[ev.seq] = _event_signature(ev)
                 live_seq = {ev.seq for ev in current}
                 sent_now = {seq: sig for seq, sig in sent_now.items() if seq in live_seq}
-                self.sent[s.path] = (s.gen, s.events_total, len(s.messages), sent_now)
+                self.sent[identity] = (s.gen, s.events_total, len(s.messages), sent_now)
             out.append({"key": r.key, "provider": r.provider, "proc": r.proc, "label": r.label, "out": r.out,
-                        "log": r.log, "session": sd})
-        self.sent = {p: v for p, v in self.sent.items() if p in live_paths}
-        return {"runs": out, "quotas": quotas, "errors": dict(errors or {})}
+                        "log": r.log, "session": sd, "meta": dict(r.meta)})
+        self.sent = {k: v for k, v in self.sent.items() if k in live}
+        return {"runs": out, "quotas": quotas, "errors": dict(errors or {}),
+                "health": {name: _health_payload(state) for name, state in (health or {}).items()}}
+
+
+def _health_payload(state) -> dict:
+    """Provider health as plain values for the pipe: `details` is a list, never a tuple."""
+    payload = asdict(state)
+    payload["details"] = list(payload["details"])
+    return payload
 
 
 def _event_signature(event: Event) -> tuple:
@@ -101,11 +110,15 @@ def _history_page(runs: list[Run], token, key, before, limit) -> dict:
 
 def _touched_since(session: Session, since: float) -> bool:
     """The collector's own test for history: an event or a write after `since`."""
-    if (session.last_ts or 0) >= since:
+    if session.last_ts is not None and session.last_ts >= since:
         return True
+    if session.path is None:
+        # No file to stat. A session with no timestamp at all cannot be placed in the window;
+        # keep it visible rather than dropping it silently.
+        return session.last_ts is None
     try:
         return os.stat(session.path).st_mtime >= since
-    except OSError:
+    except (OSError, TypeError):
         return False
 
 
@@ -113,9 +126,10 @@ class Mirror:
     """The UI's copy of every session, kept up to date from packed changes."""
 
     def __init__(self) -> None:
-        self.sessions: dict[str, Session] = {}
+        self.sessions: dict[tuple[str, str], Session] = {}
         self.quotas: dict = {}
         self.errors: dict[str, str] = {}
+        self.provider_health: dict[str, dict] = {}
 
     def apply(self, payload: dict) -> list[Run]:
         runs = []
@@ -124,10 +138,12 @@ class Mirror:
             s = None
             sd = item["session"]
             if sd is not None:
-                seen.add(sd["path"])
-                s = self.sessions.get(sd["path"])
+                identity = (item["provider"], item["key"])
+                seen.add(identity)
+                s = self.sessions.get(identity)
                 if s is None or sd["reset"]:
-                    s = self.sessions[sd["path"]] = Session(Path(sd["path"]))
+                    path = sd.get("path")
+                    s = self.sessions[identity] = Session(Path(path) if path else None)
                     s.provider = sd["provider"]
                 for k, v in sd["attrs"].items():
                     setattr(s, k, v)
@@ -143,23 +159,33 @@ class Mirror:
                 s.messages_total = sd.get("messages_total", len(s.messages))
                 s.files, s.open_questions, s.in_flight = sd["files"], sd["open_questions"], sd["in_flight"]
             proc: ProcInfo | None = item["proc"]
-            runs.append(Run(item["key"], item["provider"], s, proc, item["label"], item["out"], item["log"]))
-        self.sessions = {p: s for p, s in self.sessions.items() if p in seen}
+            meta = item.get("meta")
+            runs.append(Run(item["key"], item["provider"], s, proc, item["label"], item["out"], item["log"],
+                            meta=meta if isinstance(meta, dict) else {}))
+        self.sessions = {k: s for k, s in self.sessions.items() if k in seen}
         self.quotas = payload["quotas"]
         self.errors = payload.get("errors") or {}
+        health = payload.get("health")
+        self.provider_health = health if isinstance(health, dict) else {}
         return runs
+
+
+def configured_providers() -> list:
+    """The providers a reader runs. It loads config.toml itself: it runs in its own process."""
+    return all_providers(state_path().parent, enabled=load_config().providers)
 
 
 def _loop(send, commands, hours: float, scan_procs: bool, interval: float, stop) -> None:
     """Send data snapshots; on a failed scan send an error-only envelope and retry with bounded backoff."""
-    collector = Collector(all_providers(state_path().parent), Memory(), hours, scan_procs)
+    collector = Collector(configured_providers(), Memory(), hours, scan_procs)
     packer = Packer()
     failures = 0
     runs: list[Run] = []
     while not stop():
         try:
             runs = collector.collect()
-            payload = packer.pack(runs, collector.quotas, getattr(collector, "errors", None))
+            payload = packer.pack(runs, collector.quotas, getattr(collector, "errors", None),
+                                  getattr(collector, "health", None))
         except Exception as exc:
             # A transient file/provider failure must not permanently stop the reader. Keep the last good
             # mirror in place and report health separately from data.
@@ -240,19 +266,33 @@ class Source:
 
     @property
     def health(self) -> str:
-        """Reader health for a renderer: loading, ready, stale, partial or error."""
+        """Reader health for a renderer: loading, ready, stale, partial, degraded or error."""
         if self.error:
             return "error"
         if self.last_update is None:
             return "loading"
         if time.monotonic() - self.last_update > max(3 * self.interval, 10.0):
             return "stale"
-        return "partial" if self.mirror.errors else "ready"
+        if self.provider_errors:
+            return "partial"
+        if any(health.get("state") == "degraded" for health in self.mirror.provider_health.values()):
+            return "degraded"
+        return "ready"
 
     @property
     def provider_errors(self) -> dict[str, str]:
-        """Sanitized failures of individual providers from the last successful collection."""
-        return self.mirror.errors
+        """Sanitized failures of individual providers from the last successful collection, including
+        providers whose readers failed without failing the scan."""
+        errors = dict(self.mirror.errors)
+        for name, health in self.mirror.provider_health.items():
+            if health.get("state") == "error":
+                errors.setdefault(name, "read_error")
+        return errors
+
+    @property
+    def provider_health(self) -> dict[str, dict]:
+        """Reader health per provider from the last successful collection, as plain dicts."""
+        return self.mirror.provider_health
 
     @property
     def status(self) -> str:

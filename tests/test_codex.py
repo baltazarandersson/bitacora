@@ -50,7 +50,7 @@ def test_origin_of():
 
 
 def session_from(demo_env, sid) -> CodexSession:
-    path = next(demo_env["codex_home"].rglob(f"*{sid}.jsonl"))
+    path = next(demo_env["homes"]["codex"].rglob(f"*{sid}.jsonl"))
     s = CodexSession(path)
     s.update()
     return s
@@ -197,6 +197,36 @@ def test_garbage_lines_are_ignored(tmp_path):
     s = CodexSession(path)
     s.update()
     assert s.events_total == 0
+
+
+def test_unknown_top_level_types_are_counted_once(tmp_path):
+    path = tmp_path / "rollout-2026-01-01T00-00-00-unknown.jsonl"
+    path.write_text("\n".join([
+        _rec("2026-01-01T00:00:00Z", "session_meta", {"id": "unknown", "source": "exec"}),
+        _rec("2026-01-01T00:00:01Z", "event_msg", {"type": "task_started"}),
+        _rec("2026-01-01T00:00:02Z", "brand-new-type", {"value": 1}),
+        _rec("2026-01-01T00:00:03Z", "event_msg", {"type": "brand-new-subtype"}),
+    ]) + "\n", encoding="utf-8")
+    s = CodexSession(path)
+
+    s.update()
+
+    assert s.records_total == 4
+    assert s.unknown_records == 1  # the unknown payload subtype does not count
+    assert s.discarded == 0
+
+
+def test_ingest_counts_only_unknown_top_level_types(tmp_path):
+    s = CodexSession(tmp_path / "rollout-2026-01-01T00-00-00-ingest.jsonl")
+
+    s.ingest({"type": "world_state"})
+    s.ingest({"type": "token_usage_record"})
+    assert s.unknown_records == 0
+    assert s.records_total == 2
+
+    s.ingest({"type": "brand-new-type"})
+    assert s.unknown_records == 1
+    assert s.discarded == 0
 
 
 def test_resume_cmd_has_no_invented_defaults(demo_env):

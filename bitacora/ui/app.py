@@ -22,7 +22,7 @@ from textual.widgets import DataTable, Markdown, RichLog, Static, TabbedContent,
 
 from bitacora import i18n, procs
 from bitacora.i18n import t
-from bitacora.model import MAX_EVENTS, Run
+from bitacora.model import ACCESS_KINDS, MAX_EVENTS, Run
 from bitacora.providers import Provider
 from bitacora.sorting import RUN_COLUMNS, sort_runs, step_sort
 from bitacora.sorting import cycle_sort as next_sort
@@ -69,57 +69,10 @@ def started_text(ts: float | None) -> str:
     return datetime.fromtimestamp(ts).strftime("%d/%m %H:%M") if ts is not None else "-"
 
 
-def provider_label(provider: str) -> str:
-    key = str(provider).lower().replace("_", "-")
-    if key in ("claude", "claude-code"):
-        return t("provider_claude")
-    if key == "codex":
-        return t("provider_codex")
-    return str(provider)
-
-
-def usage_basis(session, provider: str) -> str:
-    basis = getattr(session, "usage_basis", None)
-    if basis not in ("processed", "reported"):
-        basis = "processed" if str(provider).lower().startswith("claude") else "reported"
-    return basis
-
-
 def context_tokens(session) -> int | None:
     if session is None:
         return None
     return session.context_tokens if hasattr(session, "context_tokens") else getattr(session, "ctx_used", None)
-
-
-def effort_source(session, run: Run) -> str:
-    source = getattr(session, "effort_source", "unknown") if session else "unknown"
-    if source in ("transcript", "launch"):
-        return source
-    if run.provider == "codex" and session and getattr(session, "effort", None):
-        return "transcript"
-    if run.proc and getattr(run.proc, "effort", None):
-        return "launch"
-    if session and getattr(session, "effort", None):
-        return "transcript"
-    return "unknown"
-
-
-def access_kind(session, run: Run) -> str:
-    value = getattr(session, "access_kind", None) if session else None
-    allowed = ("read-only", "workspace-write", "prompt", "auto-edit", "plan", "full-access", "other")
-    if value not in allowed:
-        from bitacora.util import access_kind as normalize_access
-        value = normalize_access(getattr(session, "sandbox", None) if session else run.sandbox, run.provider)
-    return value if value in allowed else "other"
-
-
-def context_window_assumed(session, run: Run) -> bool:
-    if getattr(session, "context_window_assumed", False):
-        return True
-    if run.provider == "claude":
-        from bitacora.providers.claude import context_window_for_model
-        return context_window_for_model(run.model) is not None
-    return False
 
 
 def format_context_tokens(value: int | None) -> str:
@@ -734,6 +687,8 @@ class Bitacora(App):
             return t("desktop_reader_short_stale"), R.YELLOW, R.YELLOW
         if health == "partial":
             return t("desktop_reader_short_partial"), R.YELLOW, R.YELLOW
+        if health == "degraded":
+            return t("desktop_reader_short_degraded"), R.YELLOW, R.DIM
         if health == "loading":
             return t("picker_loading"), R.CYAN, R.DIM
         return t("desktop_reader_ready", age=fmt_dur(time.monotonic() - self.source.last_update)), R.GREEN, R.DIM
@@ -741,6 +696,27 @@ class Bitacora(App):
     def reader_errors_note(self) -> str:
         """The failed providers, named exactly as the reader reports them."""
         return t("desktop_reader_partial", providers=", ".join(sorted(self.source.provider_errors)))
+
+    def reader_degraded_note(self) -> str:
+        """The providers whose records are being skipped, each with how many."""
+        names = [f"{self.provider_label(name)} ({health.get('discarded', 0):,})"
+                 for name, health in sorted(self.source.provider_health.items()) if health.get("state") == "degraded"]
+        return t("desktop_reader_degraded", providers=", ".join(names))
+
+    def source_state_text(self, run: Run) -> str | None:
+        """How the run's provider is being read. Unavailable providers stay silent."""
+        health = self.source.provider_health.get(run.provider)
+        state = health.get("state") if health else None
+        if state in ("ok", "verified"):
+            return t("source_state_ok")
+        if state == "degraded":
+            text = t("source_state_degraded", discarded=f"{health.get('discarded', 0):,}")
+            if health.get("unknown", 0) > 0:
+                text += " · " + t("source_unknown", unknown=f"{health.get('unknown', 0):,}")
+            return text
+        if state == "error":
+            return t("source_state_error")
+        return None
 
     def stats(self) -> dict[str, int]:
         stats = {k: 0 for k in ("asking", "running", "starting", "your_turn", "done", "failed", "limited",
@@ -905,7 +881,7 @@ class Bitacora(App):
         s = r.session
         model = r.model or "-"
         ctx_used = context_tokens(s)
-        ctx_window = getattr(s, "ctx_window", 0) if s else 0
+        ctx_window = r.context_window or 0
         if s and ctx_window and ctx_window > 0 and ctx_used is not None:
             frac = ctx_used / ctx_window
             ctx = Text(f"{100 * frac:.0f}%", style=pct_style(frac))
@@ -951,7 +927,7 @@ class Bitacora(App):
             if not first_provider:
                 tx.append("  \u00b7  ", style=R.DIM)
             first_provider = False
-            tx.append(provider_label(provider) + " ", style=f"bold {R.DIM}")
+            tx.append(self.provider_label(provider) + " ", style=f"bold {R.DIM}")
             windows = rate.get("windows") if isinstance(rate.get("windows"), list) else []
             limit = rate.get("limit")
             if isinstance(limit, dict):
@@ -992,7 +968,7 @@ class Bitacora(App):
         """The quota line's full renewal details, retained in the Details tab."""
         providers = []
         for provider, rate in self.source.mirror.quotas.items():
-            pieces = [provider_label(provider)]
+            pieces = [self.provider_label(provider)]
             windows = rate.get("windows") if isinstance(rate.get("windows"), list) else []
             for window in windows:
                 if not isinstance(window, dict):
@@ -1031,6 +1007,8 @@ class Bitacora(App):
         health = self.reader_health()[0]
         if self._compact_reader and self.source.health == "partial" and self.source.provider_errors:
             health = self.reader_errors_note()
+        elif self._compact_reader and self.source.health == "degraded":
+            health = self.reader_degraded_note()
         beacon.tooltip = health if self._compact_reader else None
         self.q("#beacon-rule", BeaconRule).set_state(
             any(r.status in ("running", "asking", "starting") for r in self.runs),
@@ -1120,7 +1098,7 @@ class Bitacora(App):
         ]
         context = Text(no_wrap=True)
         ctx_used = context_tokens(s)
-        ctx_window = getattr(s, "ctx_window", 0) if s else 0
+        ctx_window = run.context_window or 0
         if s and ctx_window and ctx_window > 0 and ctx_used is not None:
             frac = ctx_used / ctx_window
             context.append_text(bar(frac, 10))
@@ -1134,7 +1112,7 @@ class Bitacora(App):
         if s and s.n_fail:
             commands.append(f" {s.n_fail}\u2717", style=R.RED)
         row3 = [
-            pair(t("usage_" + usage_basis(s, run.provider)), fmt_tokens(s.tokens if s else 0), 1),
+            pair(t("usage_" + run.usage_basis), fmt_tokens(s.tokens if s else 0), 1),
             pair(t("hud_context"), context, 2),
             pair(t("hud_commands"), commands, 1),
             pair(t("hud_files"), str(len(s.files)) if s else "-", 1),
@@ -1435,6 +1413,12 @@ class Bitacora(App):
     def provider(self, name: str) -> Provider | None:
         return next((p for p in self.providers if p.name == name), None)
 
+    def provider_label(self, name: str) -> str:
+        prov = self.provider(name)
+        if prov is None:
+            return str(name)
+        return t(prov.label_key) if prov.label_key else (prov.label or str(name))
+
     def resume_cmd(self, run: Run) -> str | None:
         prov = self.provider(run.provider)
         return prov.resume_cmd(run) if prov else None
@@ -1443,9 +1427,9 @@ class Bitacora(App):
         if not run:
             return Text(t("no_selection"), style=R.DIM)
         s, pi = run.session, run.proc
-        basis = usage_basis(s, run.provider)
+        basis = run.usage_basis
         context_used = context_tokens(s)
-        context_window = getattr(s, "ctx_window", 0) if s else 0
+        context_window = run.context_window or 0
         if s and context_window and context_window > 0:
             context = f"{context_used:,} / {context_window:,}" if context_used is not None else \
                 f"{t('quota_value_unknown')} / {context_window:,}"
@@ -1453,15 +1437,21 @@ class Bitacora(App):
             context = format_context_tokens(context_used)
         else:
             context = "-"
-        if s and context_window_assumed(s, run):
+        if s and run.context_window_assumed:
             context += " · " + t("context_window_assumed")
-        source = effort_source(s, run)
+        source = run.effort_source
         access = translated_kind(
-            access_kind(s, run),
-            ("read-only", "workspace-write", "prompt", "auto-edit", "plan", "full-access", "other"),
+            run.access_kind or "other",
+            ACCESS_KINDS,
             "access",
         )
         origin_raw = getattr(s, "origin", getattr(run, "origin", "-")) if s else getattr(run, "origin", "-")
+        if pi:
+            pid_text = str(pi.pid)
+        elif run.meta.get("processes") is False:  # its runs never own a process; a shared service may be running
+            pid_text = t("inf_pid_shared_service") if run.meta.get("service") is True else t("inf_pid_no_process")
+        else:
+            pid_text = t("not_running")
         rows = [
             (t("inf_name"), run.label),
             (t("inf_now"), activity(s, run, limit=None).plain),
@@ -1487,8 +1477,8 @@ class Bitacora(App):
             (t("hud_quota"), self.quota_details_text()),
             (t("inf_result"), run.out or "-"),
             (t("inf_log"), run.log or "-"),
-            (t("inf_file"), str(s.path) if s else "-"),
-            (t("inf_pid"), str(pi.pid) if pi else t("not_running")),
+            (t("inf_file"), str(s.path) if s and s.path else "-"),
+            (t("inf_pid"), pid_text),
             (t("inf_command"), " ".join(pi.cmdline[1:]) if pi else "-"),
             (t("inf_resume"), self.resume_cmd(run) or "-"),
         ]
@@ -1496,6 +1486,15 @@ class Bitacora(App):
             rows.insert(1, (t("inf_question"), " | ".join(s.open_questions.values())))
         if self.source.provider_errors:
             rows.insert(1, (t("inf_reader"), self.reader_errors_note()))
+        source = self.source_state_text(run)
+        if source:
+            # A readable source sits with the file details; a problem goes near the top, where it is seen.
+            healthy = self.source.provider_health.get(run.provider, {}).get("state") in ("ok", "verified")
+            if healthy:
+                at = [k for k, _ in rows].index(t("inf_file")) + 1
+            else:
+                at = 2 if self.source.provider_errors else 1
+            rows.insert(at, (t("inf_source"), source))
         tx = Text()
         for k, v in rows:
             tx.append(f"{k:>18}  ", style="bold")
@@ -1734,7 +1733,7 @@ class Bitacora(App):
 
     def action_kill(self) -> None:
         run = self.current()
-        if not run or not run.proc or self.source.health not in ("ready", "partial"):
+        if not run or not run.proc or self.source.health not in ("ready", "partial", "degraded"):
             self.notify(t("n_not_running"), severity="warning")
             return
 

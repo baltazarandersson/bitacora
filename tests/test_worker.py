@@ -6,10 +6,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from bitacora.collector import Collector
-from bitacora.model import Event, Run, Session
+from bitacora.model import Event, ProcInfo, Run, Session
 from bitacora.providers import all_providers
 from bitacora.store import Memory
-from bitacora.worker import Mirror, Packer, Source, _history_page
+from bitacora.worker import Mirror, Packer, Source, _history_page, _touched_since
 
 
 def transfer(payload):
@@ -28,7 +28,7 @@ def test_mirror_preserves_normalized_fields_for_every_demo_session(demo_env):
     fields = ("origin_kind", "origin_raw", "effort_source", "access_kind", "usage_basis",
               "context_window_assumed")
 
-    assert len(original) == len(mirrored) == 16
+    assert len(original) == len(mirrored) == 19
     for run in mirrored:
         source = expected_by_key[run.key]
         assert run.origin_kind == source.origin_kind
@@ -51,9 +51,10 @@ def test_packer_resends_mutated_events_and_mirror_upserts_by_sequence(tmp_path):
     payload = transfer(packer.pack([run], {}))
     assert payload["runs"][0]["session"]["events"][0].count == 2
     mirror.apply(payload)
-    event = mirror.sessions[str(session.path)].last_event
+    mirrored = mirror.sessions[("synthetic", "synthetic:1")]
+    event = mirrored.last_event
     assert event.count == 2 and event.dur == 10.0 and event.detail == "first\nsecond"
-    assert len(mirror.sessions[str(session.path)].events) == 1
+    assert len(mirrored.events) == 1
 
 
 def test_reset_generation_replaces_the_mirrored_event_stream(tmp_path):
@@ -73,8 +74,69 @@ def test_reset_generation_replaces_the_mirrored_event_stream(tmp_path):
     payload = transfer(packer.pack([run], {}))
     assert payload["runs"][0]["session"]["reset"] is True
     mirror.apply(payload)
-    assert [(e.seq, e.text) for e in mirror.sessions[str(session.path)].events] == [
+    assert [(e.seq, e.text) for e in mirror.sessions[("synthetic", "synthetic:1")].events] == [
         (1, "new-0"), (2, "new-1"), (3, "new-2")]
+
+
+def test_mirror_keys_two_pathless_sessions_by_run_identity():
+    first, second = Session(None), Session(None)
+    first.provider = second.provider = "synthetic"
+    first.add(Event(1.0, "msg", "first"))
+    second.add(Event(2.0, "msg", "second"))
+    runs = [Run("synthetic:a", "synthetic", first, None, "a"),
+            Run("synthetic:b", "synthetic", second, None, "b")]
+
+    payload = transfer(Packer().pack(runs, {}))
+    assert [item["session"]["path"] for item in payload["runs"]] == [None, None]
+    mirror = Mirror()
+    mirror.apply(payload)
+
+    assert set(mirror.sessions) == {("synthetic", "synthetic:a"), ("synthetic", "synthetic:b")}
+    assert [event.text for event in mirror.sessions[("synthetic", "synthetic:a")].events] == ["first"]
+    assert [event.text for event in mirror.sessions[("synthetic", "synthetic:b")].events] == ["second"]
+
+
+def test_pathless_session_update_is_a_noop():
+    session = Session(None)
+    before = (session.offset, session.records_total, session.events_total, session.discarded)
+
+    assert session.update() is False
+    assert (session.offset, session.records_total, session.events_total, session.discarded) == before
+    assert session.read_error is None
+
+
+def test_touched_since_uses_last_ts_when_there_is_no_path():
+    now = time.time()
+
+    recent = Session(None)
+    recent.last_ts = now
+    assert _touched_since(recent, now - 3600) is True
+
+    old = Session(None)
+    old.last_ts = now - 2 * 3600
+    assert _touched_since(old, now - 3600) is False
+
+    undated = Session(None)
+    assert undated.last_ts is None
+    assert _touched_since(undated, now - 3600) is True
+
+
+def test_a_pathless_history_run_stays_in_the_window_by_last_ts():
+    recent, old = Session(None), Session(None)
+    for session in (recent, old):
+        session.provider = "synthetic"
+        session.state = "complete"
+    recent.last_ts = time.time()
+    old.last_ts = time.time() - 2 * 3600
+    runs = [Run("synthetic:recent", "synthetic", recent, None, "recent"),
+            Run("synthetic:old", "synthetic", old, None, "old")]
+    assert not any(run.live for run in runs)
+
+    source = Source(hours=1, scan_procs=False, process=False)
+    source._q.put(transfer(Packer().pack(runs, {})))
+    shown = source.poll()
+
+    assert [run.key for run in shown] == ["synthetic:recent"]
 
 
 def test_pack_and_mirror_transport_provider_errors(tmp_path):
@@ -106,6 +168,54 @@ def test_source_applies_provider_errors_and_reports_partial_health():
     source.poll()
     assert source.provider_errors == {}
     assert source.health == "ready"
+
+
+def test_provider_health_travels_with_the_payload_and_only_degraded_is_a_problem():
+    from bitacora.sources import ProviderHealth
+
+    source = Source(hours=1, scan_procs=False, process=False)
+    health = {
+        "alpha": ProviderHealth("degraded", readers=1, records=5, parsed=2, discarded=3, details=("discarded",)),
+        "beta": ProviderHealth("unavailable"),
+        "gamma": ProviderHealth("ok", readers=1, records=4, parsed=4),
+    }
+    source._q.put(transfer(Packer().pack([], {}, {}, health)))
+    assert source.poll() == []
+    assert source.provider_health["alpha"] == {
+        "state": "degraded", "readers": 1, "records": 5, "parsed": 2, "discarded": 3, "unknown": 0,
+        "details": ["discarded"], "last_good": None}
+    assert source.provider_health["beta"]["state"] == "unavailable"
+    assert source.health == "degraded"
+
+    source._q.put(transfer(Packer().pack([], {}, {"zeta": "RuntimeError"}, health)))
+    source.poll()
+    assert source.health == "partial"  # a failed provider outranks a degraded one
+
+    source._q.put(transfer(Packer().pack([], {}, {}, {"beta": ProviderHealth("unavailable")})))
+    source.poll()
+    assert source.health == "ready"  # unavailable and healthy providers stay silent
+
+    payload = Packer().pack([], {}, {})
+    del payload["health"]  # a payload without the key is still accepted
+    source._q.put(transfer(payload))
+    source.poll()
+    assert source.provider_health == {} and source.health == "ready"
+
+
+def test_a_skipped_record_in_a_real_transcript_reaches_the_source_as_degraded(demo_env):
+    claude_home = demo_env["homes"]["claude"]
+    transcript = max(claude_home.rglob("*.jsonl"), key=lambda path: path.stat().st_mtime)
+    transcript.write_text(transcript.read_text(encoding="utf-8") + "not json\n", encoding="utf-8")
+    collector = Collector(all_providers(), Memory(), 24, scan_procs=False)
+    runs = collector.collect()
+    source = Source(hours=24, scan_procs=False, process=False)
+    source._q.put(transfer(Packer().pack(runs, collector.quotas, collector.errors, collector.health)))
+    source.poll()
+
+    assert source.provider_health["claude"]["state"] == "degraded"
+    assert source.provider_health["claude"]["discarded"] >= 1
+    assert source.provider_health["codex"]["state"] == "ok"
+    assert source.health == "degraded"
 
 
 def test_source_health_order_is_error_loading_stale_partial_ready():
@@ -335,3 +445,89 @@ def test_reader_serves_older_message_pages(monkeypatch):
         assert [m["text"] for m in page["messages"][:2]] == ["m250", "m251"]
     finally:
         source.stop()
+
+
+def test_packed_runs_keep_the_provider_supplied_origin_kind(tmp_path):
+    session = Session(tmp_path / "synthetic.jsonl")
+    session.origin_kind = "other"
+    closed = Run("synthetic:1", "synthetic", session, None, "sample", meta={"origin_kind": "cli"})
+    assert closed.origin_kind == "cli"
+
+    mirrored = Mirror().apply(transfer(Packer().pack([closed], {})))[0]
+    assert mirrored.meta == {"origin_kind": "cli"}
+    assert mirrored.origin_kind == "cli"
+
+    plain = Run("synthetic:2", "synthetic", None,
+                ProcInfo("synthetic", 7, 1.0, ["synthetic"], headless=True), "plain")
+    assert plain.origin_kind == "background"
+    plain_mirrored = Mirror().apply(transfer(Packer().pack([plain], {})))[0]
+    assert plain_mirrored.meta == {}
+    assert plain_mirrored.origin_kind == "background"
+
+    other_session = Session(tmp_path / "other.jsonl")
+    other_session.origin_kind = "other"
+    other = Run("synthetic:3", "synthetic", other_session,
+                ProcInfo("synthetic", 8, 1.0, ["synthetic"], headless=True), "other",
+                meta={"origin_kind": "other"})
+    assert other.origin_kind == "other"  # a provider-supplied kind is authoritative, "other" included
+
+    # Without provider metadata, Run keeps the historical session/headless fallback.
+    fallback = Run("synthetic:4", "synthetic", other_session,
+                   ProcInfo("synthetic", 9, 1.0, ["synthetic"], headless=True), "fallback")
+    assert fallback.origin_kind == "background"  # meta-less fallback: session kind "other" + headless
+
+
+def test_provider_origin_kind_keeps_head_raw_first_branch(tmp_path):
+    from bitacora.providers.claude import ClaudeProvider
+    from bitacora.providers.codex import CodexProvider
+
+    session = Session(tmp_path / "synthetic.jsonl")
+    session.origin_kind = "other"
+    session.headless = True
+    for provider, raw in ((ClaudeProvider(), "claude-zed"), (ClaudeProvider(), "weird"),
+                          (CodexProvider(), "weird")):
+        session.origin_raw = raw
+        assert provider.origin_kind(session) == "other"  # unknown raw stays "other" even when headless
+
+    session.origin_raw = "sdk-cli"
+    assert ClaudeProvider().origin_kind(session) == "background"
+
+    session.origin_kind = "desktop"
+    assert ClaudeProvider().origin_kind(session) == "desktop"  # mapped kind wins when the raw value is valid
+
+    session.origin_kind = "other"
+    session.origin_raw = "?"
+    session.headless = False
+    assert ClaudeProvider().origin_kind(session) == "other"
+    assert CodexProvider().origin_kind(session) == "other"
+
+    session.origin_raw = ""
+    session.headless = True
+    # A missing raw value ignores a stale session kind, as HEAD did.
+    assert ClaudeProvider().origin_kind(session) == "background"
+    assert CodexProvider().origin_kind(session) == "background"
+
+
+def test_a_reader_error_without_a_failed_scan_still_reads_partial():
+    from bitacora.sources import ProviderHealth
+
+    source = Source(hours=1, scan_procs=False, process=False)
+    health = {"alpha": ProviderHealth("error", readers=1, details=("read_error",)),
+              "beta": ProviderHealth("degraded", readers=1, records=2, parsed=1, discarded=1)}
+    source._q.put(transfer(Packer().pack([], {}, {}, health)))
+    source.poll()
+    assert source.health == "partial"
+    assert source.provider_errors == {"alpha": "read_error"}
+
+
+def test_reader_leaves_out_providers_switched_off_in_config(tmp_path, monkeypatch):
+    import bitacora.worker as worker
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text("[providers]\nopencode = false\n", encoding="utf-8")
+    monkeypatch.setenv("BITACORA_HOME", str(home))
+
+    assert [provider.name for provider in worker.configured_providers()] == ["codex", "claude"]
+    monkeypatch.setenv("BITACORA_HOME", str(tmp_path / "unset"))
+    assert [provider.name for provider in worker.configured_providers()] == ["codex", "claude", "opencode"]

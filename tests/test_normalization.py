@@ -7,7 +7,6 @@ from bitacora import i18n
 from bitacora.model import ProcInfo, Run
 from bitacora.providers.claude import ClaudeProvider, ClaudeSession, context_window_for_model
 from bitacora.providers.codex import CodexProvider, CodexSession
-from bitacora.util import access_kind
 
 
 def _from_demo(home, sid, session_type):
@@ -45,7 +44,7 @@ def _codex_session(path, *, source="exec", originator="codex_exec"):
 
 
 def test_usage_metrics_keep_context_and_cumulative_totals_separate(demo_env):
-    codex = _from_demo(demo_env["codex_home"], "0199a1b2-0000-7000-8000-000000000001", CodexSession)
+    codex = _from_demo(demo_env["homes"]["codex"], "0199a1b2-0000-7000-8000-000000000001", CodexSession)
     claude = ClaudeSession(demo_env["live"][1].path)
     claude.update()
 
@@ -85,7 +84,7 @@ def test_unknown_claude_model_keeps_context_count_without_an_assumed_window(tmp_
 
 
 def test_demo_has_claude_45_and_5x_context_windows(demo_env):
-    older = _from_demo(demo_env["claude_home"], "5f0c2a1e-0000-4000-8000-000000000009", ClaudeSession)
+    older = _from_demo(demo_env["homes"]["claude"], "5f0c2a1e-0000-4000-8000-000000000009", ClaudeSession)
     newer = ClaudeSession(demo_env["live"][1].path)
     newer.update()
     assert older.context_window == 200_000 and older.context_window_assumed
@@ -93,14 +92,14 @@ def test_demo_has_claude_45_and_5x_context_windows(demo_env):
 
 
 def test_codex_stale_window_has_unknown_usage_and_type_only_limit_has_a_name(demo_env):
-    stale = _from_demo(demo_env["codex_home"], "0199a1b2-0000-7000-8000-000000000004", CodexSession)
+    stale = _from_demo(demo_env["homes"]["codex"], "0199a1b2-0000-7000-8000-000000000004", CodexSession)
     quota = CodexProvider().quota([stale])
     assert quota["reporting"] == "windows"
     assert len(quota["windows"]) == 1
     assert quota["windows"][0]["used_percent"] is None
     assert quota["windows"][0]["resets_at"] < time.time()
 
-    type_only = _from_demo(demo_env["codex_home"], "0199a1b2-0000-7000-8000-000000000007", CodexSession)
+    type_only = _from_demo(demo_env["homes"]["codex"], "0199a1b2-0000-7000-8000-000000000007", CodexSession)
     assert type_only.limit_info == {"type": "primary"}
     limit = CodexProvider().quota([type_only])["limit"]
     assert limit is not None and limit["name"] == "5h" and limit["window"] == "5h"
@@ -123,7 +122,7 @@ def test_codex_type_only_limit_without_a_window_uses_limit_only_reporting(tmp_pa
 
 
 def test_claude_quota_uses_shared_shape_and_provider_window_name(demo_env):
-    session = _from_demo(demo_env["claude_home"], "5f0c2a1e-0000-4000-8000-000000000008", ClaudeSession)
+    session = _from_demo(demo_env["homes"]["claude"], "5f0c2a1e-0000-4000-8000-000000000008", ClaudeSession)
     quota = ClaudeProvider().quota([session])
     assert quota["reporting"] == "limit-only" and quota["windows"] == []
     assert quota["limit"]["window"] == "sonnet-week"
@@ -138,7 +137,7 @@ def test_provider_and_origin_labels_are_localized(demo_env):
 
     session = ClaudeSession(demo_env["live"][1].path)
     session.update()
-    run = Run("claude", "claude", session, None, "synthetic")
+    run = Run("claude", "claude", session, None, "synthetic", meta=ClaudeProvider().run_meta(session, None))
     assert agent_text(run).plain == "Claude Code · Background"
     assert agent_table_text(run).plain == "claude · Background"
     assert quota_window_name({"name": "weekly Sonnet"}) == "Sonnet weekly"
@@ -173,15 +172,101 @@ def test_agent_table_labels_stay_short_while_full_labels_keep_provider_names():
             index = 0 if lang == "en" else 1
             full_index = index + 2
             provider = "codex" if short_provider == "codex" else "claude"
+            meta = {
+                "label_key": f"provider_{provider}",
+                "short_label_key": f"provider_{provider}_short",
+                "label": full_provider,
+                "accent": "secondary" if provider == "codex" else "accent",
+            }
             for kind, labels in kinds.items():
                 run = Run(
                     f"{provider}-{kind}", provider,
-                    SimpleNamespace(origin_kind=kind, origin="?"), None, "synthetic",
+                    SimpleNamespace(origin_kind=kind, origin="?", headless=False), None, "synthetic",
+                    meta=dict(meta),
                 )
                 assert agent_table_text(run).plain == f"{short_provider} · {labels[index]}"
                 assert agent_text(run).plain == f"{full_provider} · {labels[full_index]}"
     finally:
         i18n.set_lang("en")
+
+
+def test_render_reads_provider_metadata_instead_of_the_provider_name():
+    from types import SimpleNamespace
+
+    from bitacora.ui.render import agent_table_text, agent_text
+
+    session = SimpleNamespace(origin_kind="terminal", origin="cli", headless=False)
+    run = Run("codex-1", "codex", session, None, "synthetic", meta={
+        "label_key": "provider_claude",
+        "short_label_key": "provider_claude_short",
+        "label": "Claude Code",
+        "accent": "accent",
+    })
+    assert agent_text(run).plain == "Claude Code · Terminal"
+    assert agent_table_text(run).plain == "claude · Terminal"
+
+    # No metadata: both labels fall back to the provider name, with no name-based branch.
+    bare = Run("toy-1", "toy", SimpleNamespace(origin_kind="terminal", origin="?", headless=False), None,
+               "synthetic")
+    assert agent_text(bare).plain == "toy · Terminal"
+    assert agent_table_text(bare).plain == "toy · Terminal"
+
+
+def test_provider_metadata_feeds_the_run_properties(tmp_path):
+    codex = _codex_session(tmp_path / "codex.jsonl", source="cli", originator="codex-tui")
+    proc = ProcInfo("codex", 1, time.time(), ["codex"], model="gpt-6-luna", sandbox="read-only")
+    meta = CodexProvider().run_meta(codex, proc)
+    assert meta["label_key"] == "provider_codex" and meta["short_label_key"] == "provider_codex_short"
+    assert meta["label"] == "Codex" and meta["accent"] == "secondary"
+    assert meta["usage_basis"] == "reported"
+    assert meta["origin_kind"] == "terminal"
+    assert meta["access_kind"] == "read-only"
+    assert "context_window" not in meta  # Codex reports its window; nothing is assumed
+    run = Run("codex", "codex", codex, proc, "synthetic", meta=meta)
+    assert (run.usage_basis, run.origin_kind, run.access_kind) == ("reported", "terminal", "read-only")
+    assert run.context_window is None and not run.context_window_assumed
+
+    claude = _claude_session(tmp_path / "claude.jsonl", entrypoint="claude-desktop", permission="acceptEdits")
+    claude_meta = ClaudeProvider().run_meta(claude, None)
+    assert claude_meta["label_key"] == "provider_claude" and claude_meta["short_label_key"] == "provider_claude_short"
+    assert claude_meta["label"] == "Claude Code" and claude_meta["accent"] == "accent"
+    assert claude_meta["usage_basis"] == "processed"
+    assert claude_meta["origin_kind"] == "desktop"
+    assert claude_meta["access_kind"] == "auto-edit"
+    assert claude_meta["context_window"] == 1_000_000
+    claude_run = Run("claude", "claude", claude, None, "synthetic", meta=claude_meta)
+    assert (claude_run.usage_basis, claude_run.origin_kind, claude_run.access_kind) == (
+        "processed", "desktop", "auto-edit")
+    assert claude_run.context_window == 1_000_000 and claude_run.context_window_assumed
+
+    # A live process with no transcript yet: no origin, but access and window come from the launch.
+    proc_only = ProcInfo("claude", 2, time.time(), ["claude"], model="claude-sonnet-4-5",
+                         sandbox="bypassPermissions")
+    only = ClaudeProvider().run_meta(None, proc_only)
+    assert "origin_kind" not in only
+    assert only["access_kind"] == "full-access"
+    assert only["context_window"] == 200_000
+    only_run = Run("claude:pid2", "claude", None, proc_only, "pid 2", meta=only)
+    assert only_run.access_kind == "full-access"
+    assert only_run.context_window == 200_000 and only_run.context_window_assumed
+    assert only_run.usage_basis == "processed"
+
+
+def test_a_run_without_metadata_reads_its_session(demo_env):
+    codex = _from_demo(demo_env["homes"]["codex"], "0199a1b2-0000-7000-8000-000000000001", CodexSession)
+    run = Run("codex", "codex", codex, None, "synthetic")
+    assert run.usage_basis == "reported"
+    assert run.access_kind == "workspace-write"
+    assert run.context_window == 272_000
+    assert not run.context_window_assumed
+
+    claude = ClaudeSession(demo_env["live"][1].path)
+    claude.update()
+    claude_run = Run("claude", "claude", claude, None, "synthetic")
+    assert claude_run.usage_basis == "processed"
+    assert claude_run.access_kind is None
+    assert claude_run.context_window == 1_000_000
+    assert claude_run.context_window_assumed
 
 
 @pytest.mark.parametrize(("source", "originator", "expected"), [
@@ -228,7 +313,7 @@ def test_claude_access_modes_keep_kind_and_raw_value(raw, expected, tmp_path):
     session = _claude_session(tmp_path / "claude.jsonl", permission=raw)
     assert session.access_kind == expected
     assert session.sandbox == raw
-    assert access_kind(raw, "claude") == expected
+    assert ClaudeSession.normalize_access(raw) == expected
 
 
 @pytest.mark.parametrize(("raw", "expected"), [
@@ -238,14 +323,16 @@ def test_claude_access_modes_keep_kind_and_raw_value(raw, expected, tmp_path):
     ("unseen-mode", "other"),
 ])
 def test_codex_access_modes_map_to_shared_kinds(raw, expected):
-    assert access_kind(raw, "codex") == expected
+    assert CodexSession.normalize_access(raw) == expected
 
 
 def test_transcript_model_effort_and_access_win_over_launch_values(demo_env):
-    session = _from_demo(demo_env["codex_home"], "0199a1b2-0000-7000-8000-000000000001", CodexSession)
+    session = _from_demo(demo_env["homes"]["codex"], "0199a1b2-0000-7000-8000-000000000001", CodexSession)
     process = ProcInfo("codex", 1, time.time(), ["codex"], model="launch-model", effort="max",
                        sandbox="read-only")
-    run = Run("codex", "codex", session, process, "demo")
+    # Collected runs always carry the provider metadata; the transcript still wins over the launch values.
+    run = Run("codex", "codex", session, process, "demo",
+              meta=CodexProvider().run_meta(session, process))
     assert run.model == session.model == "gpt-6-luna"
     assert run.effort == session.effort == "high"
     assert run.effort_source == "transcript"
@@ -255,7 +342,8 @@ def test_transcript_model_effort_and_access_win_over_launch_values(demo_env):
     claude.update()
     process = ProcInfo("claude", 2, time.time(), ["claude"], model="opus", effort="max",
                        sandbox="acceptEdits")
-    run = Run("claude", "claude", claude, process, "demo")
+    run = Run("claude", "claude", claude, process, "demo",
+              meta=ClaudeProvider().run_meta(claude, process))
     assert run.model == "claude-opus-5-5"
     assert run.effort == "max" and run.effort_source == "launch"
     assert run.access_kind == "auto-edit" and run.sandbox == "acceptEdits"

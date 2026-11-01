@@ -51,7 +51,7 @@ def test_slug():
 
 
 def load(demo_env, sid) -> ClaudeSession:
-    path = next(demo_env["claude_home"].rglob(f"{sid}.jsonl"))
+    path = next(demo_env["homes"]["claude"].rglob(f"{sid}.jsonl"))
     s = ClaudeSession(path)
     s.update()
     return s
@@ -135,6 +135,36 @@ def test_title_priority_and_noise(tmp_path):
     assert s.first_prompt == "real prompt"
     assert [e.kind for e in s.events] == ["turn", "user", "note"]
     assert s.events[-1].text == "task-notification"
+
+
+def test_known_internal_types_and_degenerate_titles_are_not_unknown(tmp_path):
+    s = write(tmp_path, [
+        {"type": "system", "timestamp": "2026-01-01T00:00:00Z"},
+        {"type": "mode", "timestamp": "2026-01-01T00:00:00Z"},
+        {"type": "api-request-blob", "timestamp": "2026-01-01T00:00:00Z"},
+        {"type": "custom-title", "sessionId": "s"},  # known title type with no value
+        u("go"),
+        a({"type": "text", "text": "ok"}, stop="end_turn"),
+        {"type": "brand-new-type", "timestamp": "2026-01-01T00:00:02Z"},
+    ])
+
+    assert s.title == ""
+    assert s.records_total == 7
+    assert s.unknown_records == 1
+    assert s.discarded == 0
+
+
+def test_ingest_counts_only_unknown_top_level_types(tmp_path):
+    s = ClaudeSession(tmp_path / "s.jsonl")
+
+    s.ingest({"type": "api-request-shape"})
+    s.ingest({"type": "system"})
+    s.ingest({"type": "user", "isSidechain": True})
+    assert s.unknown_records == 0
+
+    s.ingest({"type": "brand-new-type"})
+    assert s.unknown_records == 1
+    assert s.discarded == 0
 
 
 def test_questions_interrupts_and_failures(tmp_path):

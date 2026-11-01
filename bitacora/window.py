@@ -822,7 +822,7 @@ def smoke(window, service, report):
         while time.monotonic() < deadline:
             snapshot = service.get_snapshot()
             dom = dom_state()
-            if (snapshot["reader"]["state"] == "ready" and snapshot["runs"] and dom and dom["ready"]
+            if (snapshot["reader"]["state"] in ("ready", "degraded") and snapshot["runs"] and dom and dom["ready"]
                     and dom["rows"] == len(snapshot["runs"]) and not dom["home"]):
                 issue = _smoke_layout_problem(dom)
                 if issue:

@@ -21,29 +21,6 @@ def _format_error(exc: BaseException) -> str:
     return name
 
 
-def access_kind(raw: str | None, provider: str) -> str | None:
-    """Normalize a provider's raw sandbox or permission mode for presentation."""
-    if raw is None or not str(raw).strip():
-        return None
-    value = str(raw).strip().casefold()
-    if provider == "claude":
-        return {
-            "default": "prompt",
-            "acceptedits": "auto-edit",
-            "plan": "plan",
-            "bypasspermissions": "full-access",
-        }.get(value, "other")
-    return {
-        "read-only": "read-only",
-        "workspace-write": "workspace-write",
-        "prompt": "prompt",
-        "auto-edit": "auto-edit",
-        "plan": "plan",
-        "danger-full-access": "full-access",
-        "full-access": "full-access",
-    }.get(value, "other")
-
-
 def parse_iso(ts: str | None) -> float | None:
     if not ts or not isinstance(ts, str):
         return None

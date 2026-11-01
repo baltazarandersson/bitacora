@@ -18,6 +18,28 @@ _GENERATION = itertools.count(1)  # identifies one Session object for the lifeti
 RECENT_SECS = 120
 ASK_STALE_SECS = 6 * 3600
 LIMIT_WHEN = re.compile(r"(?:try again at|resets?(?: at)?)\s+([^.()]+?)(?:\s*\(|\.|$)", re.I)
+ACCESS_KINDS = ("read-only", "workspace-write", "prompt", "auto-edit", "plan", "full-access", "other")
+GENERIC_ACCESS = {
+    "read-only": "read-only",
+    "workspace-write": "workspace-write",
+    "prompt": "prompt",
+    "auto-edit": "auto-edit",
+    "plan": "plan",
+    "danger-full-access": "full-access",
+    "full-access": "full-access",
+}
+
+
+def normalize_access_kind(raw: str | None, mapping: dict[str, str] | None = None) -> str | None:
+    """Normalize a raw sandbox or permission mode; unknown non-empty values become "other"."""
+    if raw is None or not str(raw).strip():
+        return None
+    value = str(raw).strip().casefold()
+    return (mapping if mapping is not None else GENERIC_ACCESS).get(value, "other")
+
+
+def _positive_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
 def latest_limit(sessions, now: float | None = None) -> dict | None:
@@ -75,12 +97,21 @@ class Session:
     """A session file read incrementally. Providers subclass it and implement `handle`."""
 
     provider = "?"
+    usage_basis = "unknown"
+    access_map: dict[str, str] = GENERIC_ACCESS
     # Cheap byte filters: lines that contain `skip` but none of `keep` are not parsed.
     skip_markers: tuple[bytes, ...] = ()
     keep_markers: tuple[bytes, ...] = ()
+    ignored_types: frozenset[str] = frozenset()  # top-level types the parser knows and deliberately ignores
 
-    def __init__(self, path: Path):
+    @classmethod
+    def normalize_access(cls, raw: str | None) -> str | None:
+        return normalize_access_kind(raw, cls.access_map)
+
+    def __init__(self, path: Path | None = None):
         self.path = path
+        self.locator: object | None = None  # set by a reader or the collector; survives reset()
+        self.read_error: str | None = None  # exception class name from the last failed read
         self.gen = 0
         self.reset()
 
@@ -117,6 +148,7 @@ class Session:
         self.events_total = 0
         self.records_total = 0  # non-empty, non-skippable records attempted in this stream
         self.discarded = 0  # records with invalid JSON or a handle() exception
+        self.unknown_records = 0  # valid records whose type the parser does not know
         # (record number, kind, exception name, bytes): never the raw line or the exception message.
         self.quarantine: deque[tuple[int, str, str, int]] = deque(maxlen=MAX_QUARANTINE)
         self.messages: list[tuple[float | None, str]] = []
@@ -124,7 +156,6 @@ class Session:
         self.n_cmds = 0
         self.n_fail = 0
         self.tokens = 0
-        self.usage_basis = {"codex": "reported", "claude": "processed"}.get(self.provider, "unknown")
         self.context_tokens: int | None = None
         self.ctx_window: int | None = None
         self.context_window_assumed = False
@@ -177,11 +208,19 @@ class Session:
         rec[3] += plus
         rec[4] += minus
 
+    def note_unknown(self) -> None:
+        """Count a valid record whose type the parser does not recognize."""
+        self.unknown_records += 1
+
     # -- reading
     def update(self) -> bool:
+        if self.path is None:
+            # A reader that owns its own source does not read a file: no path is a no-op, not a TypeError.
+            return False
         try:
             fh = open(self.path, "rb")
-        except OSError:
+        except OSError as exc:
+            self.read_error = type(exc).__name__
             return False
         changed = False
         try:
@@ -214,6 +253,7 @@ class Session:
                     else:
                         self._file_mtime_ns = mtime_ns
                         self._file_ctime_ns = ctime_ns
+                        self.read_error = None
                         return False
                 elif size > self.offset and self.offset and not self._checkpoint_matches(fh, self.offset):
                     # A truncate-and-regrow between polls can leave size >= offset. The saved prefix and tail
@@ -233,9 +273,11 @@ class Session:
                 self._file_identity = identity
                 self._file_mtime_ns = mtime_ns
                 self._file_ctime_ns = ctime_ns
+                self.read_error = None
                 return changed
-        except OSError:
+        except OSError as exc:
             # Files are written or rotated by another process. A transient open/read race is retried next poll.
+            self.read_error = type(exc).__name__
             return False
 
     def _checkpoint_matches(self, fh, offset: int) -> bool:
@@ -267,6 +309,17 @@ class Session:
         except OSError:
             self._file_samples.clear()
 
+    def ingest(self, obj: object, size: int = 0) -> None:
+        """Count and dispatch one already-parsed record; readers call this instead of `handle`."""
+        self.records_total += 1
+        if not isinstance(obj, dict):
+            return
+        try:
+            self.handle(obj)
+        except Exception as exc:  # a malformed record must not stop the session
+            self.discarded += 1
+            self.quarantine.append((self.records_total, "handle", type(exc).__name__, size))
+
     def _consume(self, chunk: bytes) -> None:
         if not chunk:
             return
@@ -280,19 +333,14 @@ class Session:
         for raw in lines:
             if not raw.strip() or self._skippable(raw):
                 continue
-            self.records_total += 1
             try:
                 obj = json.loads(raw.decode("utf-8", "replace"))
             except ValueError as exc:
+                self.records_total += 1
                 self.discarded += 1
                 self.quarantine.append((self.records_total, "json", type(exc).__name__, len(raw)))
                 continue
-            if isinstance(obj, dict):
-                try:
-                    self.handle(obj)
-                except Exception as exc:  # a malformed record must not stop the session
-                    self.discarded += 1
-                    self.quarantine.append((self.records_total, "handle", type(exc).__name__, len(raw)))
+            self.ingest(obj, len(raw))
 
     def _skippable(self, raw: bytes) -> bool:
         head = raw[:200]
@@ -417,15 +465,10 @@ class Run:
 
     @property
     def origin_kind(self) -> str:
-        if self.session and self.session.origin_raw not in ("?", ""):
-            if self.session.origin_kind != "other":
-                return self.session.origin_kind
-            if self.provider == "codex":
-                from bitacora.providers.codex import origin_kind_for_raw
-                return origin_kind_for_raw(self.session.origin_raw)
-            if self.provider == "claude":
-                from bitacora.providers.claude import origin_kind_for_raw
-                return origin_kind_for_raw(self.session.origin_raw)
+        supplied = self.meta.get("origin_kind")
+        if isinstance(supplied, str) and supplied:  # provider-supplied value is authoritative, "other" included
+            return supplied
+        if self.session is not None and self.session.origin_kind not in ("", "other"):
             return self.session.origin_kind
         return "background" if self.headless else "other"
 
@@ -477,18 +520,39 @@ class Run:
         return "unknown"
 
     @property
+    def usage_basis(self) -> str:
+        supplied = self.meta.get("usage_basis")
+        if supplied in ("processed", "reported", "unknown"):
+            return supplied
+        if self.session is not None and self.session.usage_basis in ("processed", "reported", "unknown"):
+            return self.session.usage_basis
+        return "unknown"
+
+    @property
+    def context_window(self) -> int | None:
+        assumed = _positive_int(self.meta.get("context_window"))
+        if assumed is not None:
+            return assumed
+        return _positive_int(self.session.ctx_window) if self.session is not None else None
+
+    @property
+    def context_window_assumed(self) -> bool:
+        return (_positive_int(self.meta.get("context_window")) is not None
+                or bool(self.session and self.session.context_window_assumed))
+
+    @property
     def sandbox(self) -> str | None:
         return (self.session and self.session.sandbox) or (self.proc and self.proc.sandbox)
 
     @property
     def access_kind(self) -> str | None:
-        if self.session and self.session.sandbox:
-            if self.session.access_kind:
-                return self.session.access_kind
-        if self.sandbox:
-            from bitacora.util import access_kind
-            return access_kind(self.sandbox, self.provider)
-        return None
+        if self.session and self.session.sandbox and self.session.access_kind:
+            return self.session.access_kind
+        supplied = self.meta.get("access_kind")
+        if supplied in ACCESS_KINDS:
+            return supplied
+        raw = self.sandbox
+        return normalize_access_kind(raw) if raw else None
 
     @property
     def access_raw(self) -> str | None:

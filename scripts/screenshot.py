@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bitacora import demo, i18n
+from bitacora.providers import all_providers
 
 ROOT = Path(__file__).resolve().parent.parent
 FONT_FACE = re.compile(r"@font-face\s*\{[^{}]*\}", re.IGNORECASE | re.DOTALL)
@@ -21,6 +22,47 @@ REMOTE_REFERENCE = re.compile(
     re.IGNORECASE,
 )
 SCRIPT_TAG = re.compile(r"<script\b", re.IGNORECASE)
+# Rich writes each glyph run as text. Half and full blocks in a fallback font do not fill their cell, which leaves
+# dark seams in the pixel art, so they are drawn as rectangles. The baseline sits 18.5px below a row's top.
+BLOCK_RUN = re.compile(r'<text class="([\w-]+)" x="([\d.]+)" y="([\d.]+)" textLength="([\d.]+)"[^>]*>([^<]*)</text>')
+ROW_FILL = re.compile(r"\.([\w-]+)\s*\{\s*fill:\s*(#[0-9a-fA-F]{6})\s*\}")
+LINE_HEIGHT = re.compile(r"line-height:\s*([\d.]+)px")
+BASELINE_FROM_TOP = 18.5
+BLOCKS = frozenset("█▀▄")
+
+
+def _num(value: float) -> str:
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def pixel_rects(svg: str) -> str:
+    """Replace block-glyph runs with exact rectangles, one per cell, in the glyph's colour."""
+    fills = dict(ROW_FILL.findall(svg))
+    line = float(LINE_HEIGHT.search(svg).group(1)) if LINE_HEIGHT.search(svg) else 24.4
+
+    def run(match: re.Match) -> str:
+        css_class, x, y, width, text = match.groups()
+        chars = set(text)
+        if not chars & BLOCKS or not chars <= BLOCKS | {" "} or css_class not in fills:
+            return match.group(0)
+        cell = float(width) / len(text)
+        top = float(y) - BASELINE_FROM_TOP
+        rects = []
+        for index, char in enumerate(text):
+            if char == " ":
+                continue
+            left = float(x) + index * cell
+            if char == "█":
+                box = (top, line)
+            elif char == "▀":
+                box = (top, line / 2)
+            else:
+                box = (top + line / 2, line / 2)
+            rects.append(f'<rect fill="{fills[css_class]}" x="{_num(left)}" y="{_num(box[0])}" '
+                         f'width="{_num(cell)}" height="{_num(box[1])}" shape-rendering="crispEdges"/>')
+        return "".join(rects)
+
+    return BLOCK_RUN.sub(run, svg)
 
 
 def local_font_face(match: re.Match) -> str:
@@ -36,6 +78,7 @@ def sanitize_svg(svg: str) -> bytes:
     svg = FONT_FACE.sub(local_font_face, svg)
     svg = GENERATED_COMMENT.sub("", svg)
     svg = svg.replace("\r\n", "\n").replace("\r", "\n")
+    svg = pixel_rects(svg)
     if REMOTE_REFERENCE.search(svg) or SCRIPT_TAG.search(svg):
         raise ValueError("screenshot SVG contains a remote reference or script")
     ET.fromstring(svg)
@@ -50,11 +93,9 @@ async def shoot(lang: str) -> None:
     with tempfile.TemporaryDirectory(prefix="bitacora-shot-") as temp:
         tmp = Path(temp)
         data = demo.generate(tmp, time.time())
-        environment = {
-            "CODEX_HOME": str(data["codex_home"]),
-            "CLAUDE_CONFIG_DIR": str(data["claude_home"]),
-            "BITACORA_HOME": str(tmp / "home"),
-        }
+        environment = {p.home_env: str(data["homes"][p.name]) for p in all_providers()
+                       if p.home_env and p.name in data["homes"]}
+        environment["BITACORA_HOME"] = str(tmp / "home")
         with patch.dict(os.environ, environment):
             os.environ.pop("NO_COLOR", None)  # documentation captures show the default color presentation
             await render(lang, data)
@@ -62,7 +103,6 @@ async def shoot(lang: str) -> None:
 
 async def render(lang: str, data: dict) -> None:
     i18n.set_lang(lang)
-    from bitacora.providers import all_providers
     from bitacora.store import Config, Memory, State
     from bitacora.ui.app import create_app
 

@@ -42,7 +42,7 @@ async def test_first_run_setup_then_view(demo_env):
         await pilot.pause(0.1)
         assert app.view_id == "everything"
         assert app.state.get("view") == "everything"
-        assert app.q("#runs", DataTable).row_count == 16
+        assert app.q("#runs", DataTable).row_count == 19
 
 
 async def test_navigation_tabs_and_toggles(demo_env):
@@ -525,7 +525,7 @@ async def test_reader_process_delivers_sessions(demo_env):
             await pilot.pause(0.1)
             if app.all_runs is not None:
                 break
-        assert len(app.all_runs) == 16
+        assert len(app.all_runs) == 19
         run = next(r for r in app.all_runs if r.label == "auth-cookies")
         assert run.session.n_cmds == 4 and len(run.session.files) == 2
         five_hour = next(window for window in app.source.mirror.quotas["codex"]["windows"]
@@ -1109,6 +1109,49 @@ async def test_partial_reader_names_providers_and_keeps_stop(demo_env, tmp_path,
         assert t("n_not_running") not in notes
 
 
+async def test_degraded_reader_names_skipped_records_and_details_name_the_source(demo_env, monkeypatch):
+    """Skipped records show in the status and in the Details of their provider; unavailable providers stay silent."""
+    from bitacora.i18n import t
+    from bitacora.ui import render as R
+    from bitacora.ui.masthead import Beacon
+    from bitacora.ui.screens import ConfirmKill
+
+    app = make_app(demo_env, view="everything")
+    async with app.run_test(size=(160, 48)) as pilot:
+        await settle(pilot, app)
+        app.source.mirror.provider_health = {
+            "codex": {"state": "degraded", "readers": 1, "records": 9, "parsed": 6, "discarded": 3, "unknown": 1,
+                      "details": ["discarded"], "last_good": None},
+            "claude": {"state": "unavailable", "readers": 0, "records": 0, "parsed": 0, "discarded": 0,
+                       "unknown": 0, "details": [], "last_good": None},
+        }
+        assert app.source.health == "degraded"
+        assert app.reader_health() == (t("desktop_reader_short_degraded"), R.YELLOW, R.DIM)
+
+        await pilot.resize_terminal(64, 24)
+        await pilot.pause(0.1)
+        app.render_hud()
+        await pilot.pause(0.1)
+        beacon = app.q("#beacon", Beacon)
+        assert app._compact_reader
+        assert beacon.tooltip == t("desktop_reader_degraded", providers=f"{app.provider_label('codex')} (3)")
+
+        codex = next(run for run in app.runs if run.provider == "codex")
+        claude = next(run for run in app.runs if run.provider == "claude")
+        assert "3 records skipped · 1 unknown record types" in app.info_text(codex).plain
+        assert app.source_state_text(claude) is None
+        assert "records skipped" not in app.info_text(claude).plain
+
+        codex.proc = ProcInfo("codex", 4242, 100.0, [])
+        app.selected = codex.key
+        notes = []
+        monkeypatch.setattr(app, "notify", lambda message, **kw: notes.append(message))
+        app.action_kill()
+        await pilot.pause(0.1)
+        assert isinstance(app.screen, ConfirmKill)  # degraded does not block a valid stop
+        assert t("n_not_running") not in notes
+
+
 async def test_kill_runs_off_the_ui_thread(demo_env, tmp_path, monkeypatch):
     import threading
 
@@ -1418,3 +1461,23 @@ async def test_incremental_log_reads_are_capped_and_the_note_closes_the_omitting
         assert second_pass and "DELTA-END-MARKER" in second_pass[-2]  # the newest bytes, then the note
         assert not any("DELTA-START-MARKER" in text for text in second_pass)  # the skipped start of the delta
         assert second_pass.count(note) == 1 and second_pass[-1] == note  # one note closes the pass, and no more
+
+
+async def test_runs_without_a_process_say_so_in_details_and_kill_is_refused(demo_env, monkeypatch):
+    from bitacora import i18n
+
+    app = make_app(demo_env)
+    async with app.run_test(size=(160, 48)) as pilot:
+        await settle(pilot, app)
+        run = next(r for r in app.all_runs if r.provider == "opencode" and r.status == "running")
+        assert run.proc is None
+        assert i18n.t("inf_pid_no_process") in app.info_text(run).plain  # no service list in this app
+        run.meta["service"] = True
+        assert i18n.t("inf_pid_shared_service") in app.info_text(run).plain
+        codex = next(r for r in app.all_runs if r.provider == "codex" and r.proc is None)
+        assert i18n.t("not_running") in app.info_text(codex).plain
+        monkeypatch.setattr(app, "current", lambda: run)
+        opened = []
+        monkeypatch.setattr(app, "push_screen", lambda *args, **kwargs: opened.append(args))
+        app.action_kill()  # no process to confirm: a warning, never the confirmation dialog
+        assert not opened

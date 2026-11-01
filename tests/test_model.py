@@ -135,6 +135,68 @@ def test_blank_and_skippable_lines_are_not_counted(tmp_path):
     assert not session.quarantine
 
 
+def test_ingest_dispatches_dicts_without_discarding(tmp_path):
+    session = RecordingSession(tmp_path / "synthetic.jsonl")
+
+    session.ingest({"value": 1})
+
+    assert session.records == [{"value": 1}]
+    assert session.records_total == 1
+    assert session.discarded == 0
+    assert not session.quarantine
+
+
+def test_ingest_counts_non_dict_values_without_discarding(tmp_path):
+    session = RecordingSession(tmp_path / "synthetic.jsonl")
+
+    session.ingest([1, 2], 7)
+
+    assert session.records == []
+    assert session.records_total == 1
+    assert session.discarded == 0
+    assert not session.quarantine
+
+
+def test_ingest_quarantines_handle_errors_without_content(tmp_path):
+    session = PickySession(tmp_path / "synthetic.jsonl")
+
+    session.ingest({"explode": "SECRET prompt"}, 42)
+
+    assert session.records == []
+    assert session.records_total == 1
+    assert session.discarded == 1
+    assert list(session.quarantine) == [(1, "handle", "RuntimeError", 42)]
+    assert "SECRET" not in repr(session.quarantine)
+    assert "private.jsonl" not in repr(session.quarantine)
+
+
+class IngestRecordingSession(RecordingSession):
+    def __init__(self, path):
+        self.ingested = []
+        super().__init__(path)
+
+    def ingest(self, obj, size=0):
+        self.ingested.append((obj, size))
+        super().ingest(obj, size)
+
+
+def test_consume_delegates_valid_lines_to_ingest_with_their_sizes(tmp_path):
+    path = tmp_path / "synthetic.jsonl"
+    first = b'{"value": 1}'
+    invalid = b"not-json"
+    second = b'{"value": 2}'
+    path.write_bytes(first + b"\n" + invalid + b"\n" + second + b"\n")
+    session = IngestRecordingSession(path)
+
+    assert session.update()
+
+    assert session.ingested == [({"value": 1}, len(first)), ({"value": 2}, len(second))]
+    assert session.records == [{"value": 1}, {"value": 2}]
+    assert session.records_total == 3
+    assert session.discarded == 1
+    assert list(session.quarantine) == [(2, "json", "JSONDecodeError", len(invalid))]
+
+
 @pytest.mark.parametrize(
     ("turn", "process", "headless", "question", "age", "expected", "source"),
     [

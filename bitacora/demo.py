@@ -7,8 +7,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import threading
 import time
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,6 +19,8 @@ CODEX_SOL_MODEL = "gpt-6.1-sol"
 CLAUDE_MODEL = "claude-opus-5-5"
 CLAUDE_SONNET_MODEL = "claude-sonnet-5-5"
 CLAUDE_HAIKU_MODEL = "claude-haiku-5-5"
+OPENCODE_MODEL = "kimi-k3"
+OPENCODE_PROVIDER = "demo"
 
 
 def iso(ts: float) -> str:
@@ -586,6 +590,184 @@ def _claude_scenes(home: Path, now: float) -> ClaudeWriter:
     return live
 
 
+# ----------------------------------------------------------------------------- opencode
+
+# The two tables the provider reads, with the columns OpenCode writes. Tests check this matches their fixture.
+OPENCODE_SCHEMA = """
+CREATE TABLE session_v2 (
+    id TEXT PRIMARY KEY,
+    parent_id TEXT,
+    fork_session_id TEXT,
+    directory TEXT NOT NULL,
+    title TEXT,
+    version TEXT NOT NULL,
+    agent TEXT,
+    model TEXT,
+    cost REAL NOT NULL DEFAULT 0,
+    tokens_input INTEGER NOT NULL DEFAULT 0,
+    tokens_output INTEGER NOT NULL DEFAULT 0,
+    tokens_reasoning INTEGER NOT NULL DEFAULT 0,
+    tokens_cache_read INTEGER NOT NULL DEFAULT 0,
+    tokens_cache_write INTEGER NOT NULL DEFAULT 0,
+    time_created INTEGER NOT NULL,
+    time_updated INTEGER NOT NULL,
+    time_busy INTEGER,
+    time_idle INTEGER,
+    time_archived INTEGER,
+    idle_outcome TEXT
+);
+
+CREATE TABLE session_message (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    time_created INTEGER NOT NULL,
+    time_updated INTEGER NOT NULL,
+    data TEXT NOT NULL
+);
+"""
+
+
+def _ms(ts: float) -> int:
+    """OpenCode stores epoch milliseconds."""
+    return int(ts * 1000)
+
+
+def _oc_session(db: sqlite3.Connection, sid: str, cwd: str, title: str, created: float, updated: float, *,
+                parent: str | None = None, busy: float | None = None, idle: float | None = None,
+                outcome: str | None = None, tokens: tuple = (0, 0, 0, 0, 0)) -> None:
+    db.execute("INSERT INTO session_v2 (id, parent_id, directory, title, version, model, cost, tokens_input, "
+               "tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, time_created, "
+               "time_updated, time_busy, time_idle, idle_outcome) "
+               "VALUES (?, ?, ?, ?, '2.2.4', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+               (sid, parent, cwd, title, json.dumps({"id": OPENCODE_MODEL, "providerID": OPENCODE_PROVIDER}),
+                *tokens, _ms(created), _ms(updated), None if busy is None else _ms(busy),
+                None if idle is None else _ms(idle), outcome))
+
+
+def _oc_message(db: sqlite3.Connection, sid: str, seq: int, typ: str, ts: float, data: dict) -> None:
+    db.execute("INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) "
+               "VALUES (?, ?, ?, ?, ?, ?, ?)",
+               (f"msg_{sid}_{seq}", sid, typ, seq, _ms(ts), _ms(ts), json.dumps(data)))
+
+
+def _oc_answer(content: list, *, finish: str = "tool-calls", prompt: int = 0, cache: int = 0, output: int = 0,
+               variant: str | None = None) -> dict:
+    model = {"id": OPENCODE_MODEL, "providerID": OPENCODE_PROVIDER}
+    if variant:
+        model["variant"] = variant
+    return {"model": model, "finish": finish, "content": content,
+            "tokens": {"input": prompt, "output": output, "reasoning": 0, "cache": {"read": cache, "write": 0}}}
+
+
+def _oc_text(text: str) -> dict:
+    return {"type": "text", "text": text}
+
+
+def _oc_reasoning(text: str, at: float) -> dict:
+    return {"type": "reasoning", "text": text, "time": {"created": _ms(at)}}
+
+
+def _oc_tool(tid: str, name: str, inp: dict, at: float, *, status: str = "completed", out: str = "",
+             meta: dict | None = None, secs: float = 1.0) -> dict:
+    state = {"status": status, "input": inp, "metadata": meta or {}}
+    times = {"created": _ms(at)}
+    if status == "completed":
+        state["content"] = out
+        times["completed"] = _ms(at + secs)
+    return {"type": "tool", "id": tid, "name": name, "executed": True, "state": state, "time": times}
+
+
+def _opencode_scenes(db_path: Path, now: float) -> str:
+    """A synthetic OpenCode store: a running session, a finished one with a subagent, and one a limit stopped.
+    Returns the id of the running session, which the animator keeps moving."""
+    api, etl, web = demo_cwd("shop-api"), demo_cwd("etl-pipeline"), demo_cwd("shop-web")
+    with closing(sqlite3.connect(db_path)) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.executescript(OPENCODE_SCHEMA)
+
+        # 1. Working right now: a failing test, then an edit and a test run still in flight.
+        sid = "ses_3f9a1c01"
+        start = now - 9 * 60
+        _oc_session(db, sid, api, "Add Retry-After to search 429s", start, now - 20, busy=start,
+                    tokens=(60_000, 4_200, 800, 110_000, 6_000))
+        _oc_message(db, sid, 1, "user", start, {"text": "Search returns a bare 429 when a client is rate limited. "
+                                                        "Add a Retry-After header and a test for it."})
+        handler, limiter = f"{api}/src/search/handler.py", f"{api}/src/search/ratelimit.py"
+        _oc_message(db, sid, 2, "assistant", start + 10, _oc_answer([
+            _oc_text("The limiter knows the window and the handler only forwards the error. Reading both first."),
+            _oc_tool("t1", "read", {"path": handler}, start + 11, out="def search(req):\n    ..."),
+            _oc_tool("t2", "grep", {"pattern": "RateLimited", "path": f"{api}/src"}, start + 12,
+                     out="src/search/ratelimit.py:31: raise RateLimited(window)"),
+        ], prompt=41_000, cache=38_000, output=640, variant="high"))
+        _oc_message(db, sid, 3, "assistant", start + 150, _oc_answer([
+            _oc_reasoning("The 429 is raised in the limiter. The handler can read the retry window from the error.",
+                          start + 150),
+            _oc_tool("t3", "edit", {"path": limiter}, start + 151, out="Edit applied.",
+                     meta={"files": [{"file": limiter, "additions": 7, "deletions": 1}]}),
+            _oc_tool("t4", "shell", {"command": "pytest -q tests/test_search.py"}, start + 160,
+                     out="F.\nFAILED test_429_has_retry_after - assert 'Retry-After' in headers",
+                     meta={"exit": 1}, secs=3.0),
+        ], prompt=52_000, cache=46_000, output=980, variant="high"))
+        _oc_message(db, sid, 4, "assistant", now - 20, _oc_answer([
+            _oc_text("The header is set. The old test expects a bare 429, so I am updating it and rerunning."),
+            _oc_tool("t5", "edit", {"path": f"{api}/tests/test_search.py"}, now - 20, status="running"),
+            _oc_tool("t6", "shell", {"command": "pytest -q tests/test_search.py"}, now - 19, status="running"),
+        ], prompt=6_000, cache=52_000, output=260, variant="high"))
+        running = sid
+
+        # 2. Finished about three hours ago: reads, a subagent, an edit, a new file, passing tests.
+        sid, child = "ses_3f9a1c02", "ses_3f9a1c03"
+        start, end = now - 3 * 3600 - 14 * 60, now - 3 * 3600
+        _oc_session(db, sid, etl, "Make the nightly export resumable", start, end, busy=start, idle=end,
+                    outcome="succeeded", tokens=(132_000, 3_600, 1_900, 100_000, 0))
+        _oc_session(db, child, etl, "Subagent: Find callers of export_day", start + 540, start + 600, parent=sid)
+        _oc_message(db, sid, 1, "user", start, {"text": "The nightly export starts over from day one when it fails "
+                                                        "halfway. Make it resume from the last committed day."})
+        nightly = f"{etl}/etl/export/nightly.py"
+        _oc_message(db, sid, 2, "assistant", start + 30, _oc_answer([
+            _oc_reasoning("Each day commits in its own transaction, so the last committed day is a safe checkpoint.",
+                          start + 30),
+            _oc_tool("s1", "read", {"path": nightly}, start + 31,
+                     out="def run(days):\n    for day in days:\n        export_day(day)"),
+            _oc_tool("s2", "subagent", {"description": "Find callers of export_day", "agent": "explore"},
+                     start + 40, out="etl/cli.py:18\netl/tasks/nightly.py:44", secs=60.0),
+        ], prompt=30_000, output=1_100, variant="high"))
+        _oc_message(db, sid, 3, "assistant", start + 200, _oc_answer([
+            _oc_text("Only the nightly task calls it, from the top of the loop. Adding a checkpoint file and a skip."),
+            _oc_tool("s3", "edit", {"path": nightly}, start + 201, out="Edit applied.",
+                     meta={"files": [{"file": nightly, "additions": 18, "deletions": 4}]}),
+            _oc_tool("s4", "write", {"path": f"{etl}/etl/export/checkpoint.py",
+                                     "content": "def last_committed(path):\n    ...\n"},
+                     start + 210, out="File written successfully."),
+        ], prompt=52_000, cache=40_000, output=1_600, variant="high"))
+        _oc_message(db, sid, 4, "assistant", start + 420, _oc_answer([
+            _oc_tool("s5", "shell", {"command": "pytest tests/test_export.py -q"}, start + 421,
+                     out="...........\n7 passed in 1.9s", meta={"exit": 0}, secs=2.0),
+            _oc_text("Exports resume from the last committed day now. Seven export tests pass."),
+        ], finish="stop", prompt=71_000, cache=60_000, output=900, variant="high"))
+        _oc_message(db, sid, 5, "idle", end, {"outcome": "succeeded"})
+
+        # 3. Stopped by a free-tier limit yesterday, after a short look at the data.
+        sid = "ses_3f9a1c04"
+        start, end = now - 17 * 3600 - 4 * 60, now - 17 * 3600
+        _oc_session(db, sid, web, "Summarize checkout error tickets", start, end, busy=start, idle=end,
+                    outcome="failed", tokens=(9_000, 300, 0, 0, 0))
+        _oc_message(db, sid, 1, "user", start, {"text": "Summarize last week's checkout error tickets into the "
+                                                        "five most common causes."})
+        _oc_message(db, sid, 2, "assistant", start + 12, _oc_answer([
+            _oc_text("Counting the tickets for the week first."),
+            _oc_tool("l1", "shell", {"command": "ls exports/tickets/2026-w43 | wc -l"}, start + 13, out="412",
+                     meta={"exit": 0}),
+        ], prompt=9_000, output=300))
+        _oc_message(db, sid, 3, "idle", end, {"outcome": "failed", "error": {
+            "type": "provider.free-limit", "status": 429,
+            "message": f"Free usage limit reached for {OPENCODE_MODEL}. It resets in about five hours."}})
+        db.commit()
+    return running
+
+
 # ----------------------------------------------------------------------------- scenario
 
 def generate(root: Path, now: float | None = None) -> dict:
@@ -597,6 +779,10 @@ def generate(root: Path, now: float | None = None) -> dict:
     state: dict = {}
     live_codex, waiting_codex = _codex_scenes(codex_home, runs, now, state)
     live_claude = _claude_scenes(claude_home, now)
+    opencode_home = root / "opencode"
+    opencode_home.mkdir(parents=True, exist_ok=True)
+    opencode_db = opencode_home / "opencode.db"
+    running_sid = _opencode_scenes(opencode_db, now)
 
     # File times follow the last record, as they would on a real machine.
     for f in list(codex_home.rglob("*.jsonl")) + list(claude_home.rglob("*.jsonl")):
@@ -604,16 +790,32 @@ def generate(root: Path, now: float | None = None) -> dict:
         if last:
             ts = datetime.fromisoformat(last.replace("Z", "+00:00")).timestamp()
             os.utime(f, (ts, ts))
-    return {"codex_home": codex_home, "claude_home": claude_home, "state": state,
-            "live": (live_codex, live_claude), "waiting": waiting_codex}
+    homes = {"codex": codex_home, "claude": claude_home, "opencode": opencode_db}
+    return {"root": root, "homes": homes, "state": state,
+            "live": (live_codex, live_claude, (opencode_db, running_sid)), "waiting": waiting_codex}
+
+
+def _touch_opencode(db_path: Path, sid: str, now: float, step: int) -> None:
+    """Keep the running OpenCode session writing: its row moves on every tick, and an answer arrives now and then."""
+    try:
+        with closing(sqlite3.connect(f"{Path(db_path).as_uri()}?mode=rw", uri=True, timeout=5)) as db:
+            db.execute("UPDATE session_v2 SET time_updated = ? WHERE id = ?", (_ms(now), sid))
+            if step % 6 == 5:
+                seq = db.execute("SELECT MAX(seq) FROM session_message WHERE session_id = ?", (sid,)).fetchone()[0]
+                _oc_message(db, sid, seq + 1, "assistant", now, _oc_answer(
+                    [_oc_text("Re-running the retry tests after the header change.")], prompt=6_000,
+                    cache=52_000, output=40, variant="high"))
+            db.commit()
+    except sqlite3.Error:
+        pass  # a locked or busy write is skipped; the next tick writes again
 
 
 class Animator(threading.Thread):
-    """Keeps the two live demo sessions moving so the dashboard looks like a real day."""
+    """Keeps the live demo sessions moving so the dashboard looks like a real day."""
 
     def __init__(self, live: tuple, every: float = 3.0, waiting: CodexWriter | None = None):
         super().__init__(daemon=True)
-        self.codex, self.claude = live
+        self.codex, self.claude, self.opencode = live
         self.waiting = waiting
         self.every = every
         self.stop = threading.Event()
@@ -628,6 +830,7 @@ class Animator(threading.Thread):
             if self.waiting:
                 self.waiting.t = now - 1
                 self.waiting.ev({"type": "token_count", "info": None})
+            _touch_opencode(self.opencode[0], self.opencode[1], now, i)
             step = i % 4
             if step == 0:
                 self.codex.think(0.5)

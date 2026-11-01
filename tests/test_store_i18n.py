@@ -28,6 +28,28 @@ def test_broken_config_falls_back(tmp_path):
     assert cfg.hours == 24 and cfg.errors
 
 
+def test_provider_switches_read_booleans_and_report_the_rest(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("hours = 12\n", encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.providers == {} and cfg.errors == []  # a missing table keeps every provider enabled
+
+    path.write_text("[providers]\nopencode = false\nclaude = true\n", encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.providers == {"opencode": False, "claude": True} and cfg.errors == []
+
+    path.write_text('[providers]\nopencode = "no"\ncodex = 0\nmystery = false\n', encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.providers == {}
+    assert len(cfg.errors) == 3 and all(str(path) in error for error in cfg.errors)
+    assert any("mystery" in error for error in cfg.errors)
+    assert sum("true or false" in error for error in cfg.errors) == 2
+
+    path.write_text('providers = ["opencode"]\n', encoding="utf-8")
+    cfg = load_config(path)
+    assert cfg.providers == {} and len(cfg.errors) == 1
+
+
 def test_history_window_is_capped_at_72_hours_when_loaded(tmp_path, monkeypatch):
     monkeypatch.setenv("BITACORA_HOME", str(tmp_path))
     assert capped_hours(168) == 72 and capped_hours(72) == 72 and capped_hours(36) == 36

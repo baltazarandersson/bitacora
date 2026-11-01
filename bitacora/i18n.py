@@ -82,8 +82,10 @@ S: dict[str, tuple[str, str]] = {
     "col_pid": ("PID", "PID"),
     "provider_claude": ("Claude Code", "Claude Code"),
     "provider_codex": ("Codex", "Codex"),
+    "provider_opencode": ("OpenCode", "OpenCode"),
     "provider_claude_short": ("claude", "claude"),
     "provider_codex_short": ("codex", "codex"),
+    "provider_opencode_short": ("opencode", "opencode"),
     "origin_terminal": ("Terminal", "Terminal"),
     "origin_background": ("Background", "Segundo plano"),
     "origin_desktop": ("Desktop app", "App de escritorio"),
@@ -221,6 +223,7 @@ S: dict[str, tuple[str, str]] = {
     "ev_lines_before": ("… {n} lines before", "… {n} líneas antes"),
     "ev_lines_more": ("… {n} more lines", "… {n} líneas más"),
     "ev_earlier": ("… {n} earlier events not shown", "… {n} eventos anteriores sin mostrar"),
+    "ev_note_compacted": ("context compacted", "contexto compactado"),
     # detail panes
     "no_session_file": (
         "Session details are not available yet.",
@@ -244,6 +247,9 @@ S: dict[str, tuple[str, str]] = {
     "res_no_out": ("not set", "sin definir"),
     "no_selection": ("No session selected.", "Sin sesión seleccionada."),
     "not_running": ("(no running process)", "(sin proceso en ejecución)"),
+    "inf_pid_no_process": ("No process of its own", "Sin proceso propio"),
+    "inf_pid_shared_service": ("No process of its own (shared OpenCode service)",
+                               "Sin proceso propio (servicio compartido de OpenCode)"),
     "inf_status": ("Status", "Estado"),
     "inf_status_source": ("Status source", "Origen del estado"),
     "status_source_process": ("process", "proceso"),
@@ -271,6 +277,11 @@ S: dict[str, tuple[str, str]] = {
     "inf_context": ("Context used", "Contexto usado"),
     "usage_processed": ("Processed", "Procesados"),
     "usage_reported": ("Reported", "Reportados"),
+    "usage_unknown": ("Usage", "Uso"),
+    "usage_unknown_basis": (
+        "The provider does not report how it counts tokens.",
+        "El proveedor no indica cómo cuenta los tokens.",
+    ),
     "usage_processed_basis": (
         "Cumulative prompt and output tokens across unique Claude Code messages, including cache reads and writes.",
         "Tokens acumulados de entrada y salida en mensajes únicos de Claude Code, incluidos los de lectura "
@@ -298,6 +309,11 @@ S: dict[str, tuple[str, str]] = {
     "inf_command": ("Command", "Comando"),
     "inf_resume": ("Resume", "Retomar"),
     "inf_reader": ("Reader", "Lector"),
+    "inf_source": ("Source", "Fuente"),
+    "source_state_ok": ("Readable", "Legible"),
+    "source_state_degraded": ("{discarded} records skipped", "{discarded} registros omitidos"),
+    "source_unknown": ("{unknown} unknown record types", "{unknown} tipos de registro desconocidos"),
+    "source_state_error": ("Read error", "Error de lectura"),
     # notifications
     "n_paused": ("Auto-scroll paused (f to resume)", "Auto-scroll pausado (f para reanudar)"),
     "n_live_on": ("Showing live sessions only", "Mostrando solo sesiones en vivo"),
@@ -348,7 +364,8 @@ S: dict[str, tuple[str, str]] = {
     "view_interactive": ("Interactive", "Interactivas"),
     "view_interactive_d": ("desktop apps, IDEs and terminal chats", "apps de escritorio, IDEs y chats en terminal"),
     "view_live": ("Live", "En vivo"),
-    "view_live_d": ("sessions with a running process", "sesiones con un proceso en ejecución"),
+    "view_live_d": ("sessions with a running process or recent activity",
+                    "sesiones con un proceso en ejecución o actividad reciente"),
     "view_custom_d": ("from your config.toml", "de tu config.toml"),
     "tagline": ("a logbook for your coding agents", "la bitácora de tus agentes de código"),
     "setup_first": (
@@ -465,6 +482,9 @@ S: dict[str, tuple[str, str]] = {
     "desktop_reader_short_stale": ("out of date", "desactualizado"),
     "desktop_reader_short_error": ("read error", "error de lectura"),
     "desktop_reader_short_partial": ("partial", "parcial"),
+    "desktop_reader_short_degraded": ("records skipped", "registros omitidos"),
+    "desktop_reader_degraded": ("Some records could not be read and were skipped: {providers}.",
+                                "Algunos registros no se pudieron leer y se omitieron: {providers}."),
     "desktop_bridge_error": (
         "Cannot read session data. Retrying…",
         "No se pueden leer los datos de las sesiones. Reintentando…",

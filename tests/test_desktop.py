@@ -19,6 +19,7 @@ class SyntheticSource:
     health = "ready"
     error = None
     provider_errors = {}
+    provider_health = {}
 
     def __init__(self, collector):
         self.collector = collector
@@ -66,7 +67,7 @@ def build_service(demo_env, view="everything"):
     memory.save()
     providers = all_providers()
     source = SyntheticSource(Collector(providers, memory, 24, scan_procs=False))
-    runtime = Runtime(Config(), State(), providers, "en", demo_env["codex_home"].parent)
+    runtime = Runtime(Config(), State(), providers, "en", demo_env["root"])
     return DesktopService(runtime, view=view, source=source)
 
 
@@ -82,7 +83,7 @@ def test_desktop_full_demo_data_and_serializable_contract(service):
     assert boot["lang"] == "en" and not boot["first_run"]
     assert len(boot["themes"]) == 10 and len(boot["views"]) == 4
     snapshot = service.get_snapshot()
-    assert len(snapshot["runs"]) == 16
+    assert len(snapshot["runs"]) == 19  # 16 Codex and Claude runs and 3 OpenCode runs
     assert snapshot["runs"][0]["status"] == "asking"
     assert snapshot["counts"]["views"]["background"] == {"total": 9, "live": 3}
     five_hour = next(window for window in snapshot["quotas"]["codex"]["windows"] if window["id"] == "5h")
@@ -95,6 +96,28 @@ def test_desktop_full_demo_data_and_serializable_contract(service):
     assert detail["log"]["path"].startswith("/demo/")
     assert not auth["actions"]["stop"]  # demo recency is not a real process identity
     json.dumps({"bootstrap": boot, "snapshot": snapshot, "detail": detail}, allow_nan=False)
+
+
+def test_runs_without_a_process_say_so_in_details_and_cannot_be_stopped(service, monkeypatch):
+    from bitacora import i18n
+
+    snapshot = service.get_snapshot()
+    running = next(r for r in snapshot["runs"] if r["provider"] == "opencode" and r["status"] == "running")
+    assert running["pid"] is None and not running["actions"]["stop"]
+    assert not service.request_stop(running["key"])["ok"]
+
+    def pid_row(key):
+        detail = service.get_detail(key)
+        return next(row["value"] for row in detail["info"] if row["label"] == i18n.t("inf_pid"))
+
+    assert pid_row(running["key"]) == i18n.t("inf_pid_no_process")  # no process list in this service: generic text
+    run = service._run(running["key"])
+    monkeypatch.setitem(run.meta, "service", True)
+    assert pid_row(running["key"]) == i18n.t("inf_pid_shared_service")
+    limited = next(r for r in snapshot["runs"] if r["provider"] == "opencode" and r["status"] == "limited")
+    assert pid_row(limited["key"]) == i18n.t("inf_pid_no_process")
+    codex = next(r for r in snapshot["runs"] if r["provider"] == "codex" and r["pid"] is None)
+    assert pid_row(codex["key"]) == i18n.t("not_running")  # a transcript-only Codex run is not a shared service
 
 
 def test_detail_revisions_let_the_client_skip_unchanged_aspects(service):
@@ -375,7 +398,7 @@ def test_preferences_validate_before_persist_and_relabel(service):
     assert result["lang"] == "es" and result["preferences"]["font_size"] == 18
     assert result["strings"]["desktop_stop"] == "Detener"
     assert State().get("lang") == "es"
-    assert len(service.get_snapshot()["runs"]) == 4
+    assert len(service.get_snapshot()["runs"]) == 5
 
 
 def test_theme_then_view_then_a_fresh_service_show_the_same_preferences(demo_env):
@@ -524,10 +547,10 @@ def test_desktop_formatted_values_match_terminal_rounding_and_full_activity(serv
 
 
 def test_a_saved_window_refreshes_the_list_and_survives_a_stale_copy(service):
-    assert len(service.get_snapshot()["runs"]) == 16
+    assert len(service.get_snapshot()["runs"]) == 19
     service.save_preferences({"hours": 6})
     shown = service.get_snapshot()["runs"]
-    assert 0 < len(shown) < 16
+    assert 0 < len(shown) < 19
     assert all(run["live"] or (run["last_ts"] or 0) >= time.time() - 6 * 3600 for run in shown)
     other = State()  # another interface saves 72 hours while this service still holds 6
     other.set("hours", 72)
@@ -542,16 +565,16 @@ def test_a_saved_window_narrows_the_snapshot_through_the_real_reader(demo_env):
         memory.remember(key, entry)
     memory.save()
     providers = all_providers()
-    runtime = Runtime(Config(hours=168), State(), providers, "en", demo_env["codex_home"].parent)
+    runtime = Runtime(Config(hours=168), State(), providers, "en", demo_env["root"])
     service = DesktopService(runtime, view="everything", source=Source(168, scan_procs=False, process=False))
     try:
         deadline = time.monotonic() + 20
-        while len(service.get_snapshot()["runs"]) < 16 and time.monotonic() < deadline:
+        while len(service.get_snapshot()["runs"]) < 19 and time.monotonic() < deadline:
             time.sleep(0.05)
-        assert len(service.get_snapshot()["runs"]) == 16
+        assert len(service.get_snapshot()["runs"]) == 19
         service.save_preferences({"hours": 6})
         shown = service.get_snapshot()["runs"]  # answered before the reader has collected for 6 hours
-        assert 0 < len(shown) < 16
+        assert 0 < len(shown) < 19
         assert all(run["live"] or (run["last_ts"] or 0) >= time.time() - 6 * 3600 for run in shown)
     finally:
         service.close()
@@ -672,6 +695,35 @@ def test_partial_reader_reports_provider_errors_and_keeps_stop(service, tmp_path
 
     service._source.health = "error"
     assert service.get_snapshot()["runs"][0]["actions"]["stop"] is False
+
+
+def test_degraded_reader_names_providers_and_details_show_the_source(service):
+    from bitacora.i18n import t
+
+    service.get_snapshot()  # consume the first collection
+    codex = next(run for run in service._runs if run.provider == "codex")
+    claude = next(run for run in service._runs if run.provider == "claude")
+    assert service.get_snapshot()["reader"]["degraded"] == []  # a healthy read has nothing to report
+
+    service._source.provider_health = {
+        "codex": {"state": "degraded", "readers": 1, "records": 9, "parsed": 6, "discarded": 3, "unknown": 1,
+                  "details": ["discarded"], "last_good": None},
+        "claude": {"state": "unavailable", "readers": 0, "records": 0, "parsed": 0, "discarded": 0, "unknown": 0,
+                   "details": [], "last_good": None},
+    }
+    service._source.health = "degraded"
+    reader = service.get_snapshot()["reader"]
+    assert reader["state"] == "degraded" and reader["errors"] == []
+    assert len(reader["degraded"]) == 1
+    assert reader["degraded"][0]["discarded"] == 3
+    assert reader["degraded"][0]["provider"] == "codex"
+    assert reader["degraded"][0]["label"] not in ("", "codex")  # the translated display label
+
+    rows = {row["label"]: row["value"] for row in service.get_detail(codex.key)["info"]}
+    assert rows[t("inf_source")] == "3 records skipped · 1 unknown record types"
+    assert t("inf_source") not in {row["label"] for row in service.get_detail(claude.key)["info"]}
+    service._source.health = "partial"
+    assert service.get_snapshot()["reader"]["state"] == "partial"
 
 
 def test_scene_reuses_existing_algorithm_and_bounds_dimensions(service):

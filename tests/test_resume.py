@@ -1,8 +1,9 @@
 """Resume commands come from a validated {argv, cwd} spec and are only rendered, never executed."""
 import shlex
+from dataclasses import replace
 
 from bitacora.model import Run, Session
-from bitacora.providers.base import Capabilities, Provider, render_resume, resume_cwd, resume_value
+from bitacora.providers.base import Capabilities, Provider, Support, render_resume, resume_cwd, resume_value
 from bitacora.providers.claude import ClaudeProvider
 from bitacora.providers.codex import CodexProvider
 
@@ -93,6 +94,11 @@ def test_arguments_are_quoted_only_when_needed():
 def test_resume_capability_gates_the_command(tmp_path):
     class FakeProvider(Provider):
         name = "fake"
+        capabilities = Capabilities(
+            processes=False, history=False, resume=Support.FULL, messages=Support.NONE, commands=Support.NONE,
+            files=Support.NONE, questions=Support.NONE, usage=Support.NONE, context=Support.NONE,
+            quota=Support.NONE, titles=Support.NONE, subagents=Support.NONE,
+        )
 
         def resume(self, _run):
             return {"argv": ["fake", "resume", SID], "cwd": "/repo"}
@@ -103,7 +109,7 @@ def test_resume_capability_gates_the_command(tmp_path):
     assert enabled.resume_cmd(r, "sh") == render_resume(enabled.resume(r), "sh")
 
     disabled = FakeProvider()
-    disabled.capabilities = Capabilities(resume=False)
+    disabled.capabilities = replace(FakeProvider.capabilities, resume=Support.NONE)
     assert disabled.resume(r) is not None  # the spec is valid; only the capability says no command
     assert disabled.resume_cmd(r) is None
     assert disabled.resume_cmd(r, "sh") is None
@@ -116,3 +122,9 @@ def test_default_shell_follows_the_platform(monkeypatch):
     assert render_resume(spec) == f"cd -- /repo && claude --resume {SID}"
     monkeypatch.setattr(base.os, "name", "nt")
     assert render_resume(spec) == f"Set-Location -LiteralPath '/repo'; claude --resume {SID}"
+
+
+def test_powershell_doubles_typographic_single_quotes_in_the_folder():
+    cwd = "/work/Ana’s ‘app’"
+    rendered = render_resume({"argv": ["claude", "--resume", SID], "cwd": cwd}, "powershell")
+    assert rendered.startswith("Set-Location -LiteralPath '/work/Ana’’s ‘‘app’’';")

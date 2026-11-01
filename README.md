@@ -2,7 +2,7 @@
 
 **English** · [Español](https://github.com/baltazarandersson/bitacora/blob/main/README.es.md)
 
-A local monitor for coding agents. Follow background runs and interactive sessions from Codex and Claude Code.
+A local monitor for coding agents. Follow background runs and interactive sessions from Codex, Claude Code and OpenCode.
 
 Bitácora has a Windows desktop app and a terminal interface for Windows, Linux and macOS. Both use the same session reader and keep the same activity, messages, files, logs, results, quotas and preferences.
 
@@ -35,16 +35,16 @@ To try it without any agent installed:
 uvx bitacora --demo
 ```
 
-The 1.2 Windows build ships one public executable, `bitacora.exe`, which opens the desktop app without Python or a console. Download it from the [latest release page](https://github.com/baltazarandersson/bitacora/releases/latest). It requires Microsoft Edge WebView2 Runtime. It is not code-signed, so SmartScreen may warn you the first time.
+The Windows build ships one public executable, `bitacora.exe`, which opens the desktop app without Python or a console. Download it from the [latest release page](https://github.com/baltazarandersson/bitacora/releases/latest). It requires Microsoft Edge WebView2 Runtime. It is not code-signed, so SmartScreen may warn you the first time.
 
-From a Python install, add `pip install "bitacora[window]"` and run `bitacora --window`. Desktop support in 1.2 targets Windows; the terminal interface remains available on all three systems.
+From a Python install, add `pip install "bitacora[window]"` and run `bitacora --window`. Desktop support in 1.3 targets Windows; the terminal interface remains available on all three systems.
 
 ## What it shows
 
 - Every session with its status: question, starting, running, quiet, your turn, done, failed, limit reached, stopped or unknown.
 - An activity feed per session: commands with their exit codes, file edits with lines added and removed, messages, and how long the agent thought before each step.
 - Tabs for messages, touched files, the run's log, its result file and the full session details.
-- Context for the latest model call, as a percentage when the model window is known and otherwise as a token count. Total is cumulative: Claude Code counts processed prompt and output tokens, including cache use; Codex shows its reported total. Quota windows show their used percentage or reset state, and unknown values stay unknown.
+- Context for the latest model call, as a percentage when the model window is known and otherwise as a token count. Total is cumulative: Claude Code counts processed prompt and output tokens, including cache use; Codex and OpenCode show their reported total. Quota windows show their used percentage or reset state, and unknown values stay unknown.
 - A notification when a run finishes, stops or asks you something.
 - Actions on the selected run: stop it (it asks first), open its result or log (supported text formats open in your system application), copy the command that resumes it.
 
@@ -131,21 +131,25 @@ Bitácora only reads files the agents already write.
 
 - **Codex**: rollouts in `~/.codex/sessions` (or `$CODEX_HOME`), thread names from `session_index.jsonl`, and the `codex exec` / `codex` processes with their flags (`-m`, `-c`, `-C`, `-s`, `-o`, `resume <id>`).
 - **Claude Code**: transcripts in `~/.claude/projects` (or `$CLAUDE_CONFIG_DIR`) and the `claude` processes with `--resume`, `--session-id`, `--model`, `-p`.
+- **OpenCode**: the session database `~/.local/share/opencode/opencode.db` (or `$OPENCODE_DB`), opened read-only. The desktop app and the CLI share one background service, so OpenCode sessions have no process of their own: a session reads as running while the database shows it busy and recently updated.
 
 A live process is matched to its session by id when the command line has one, and otherwise by working directory and start time. The log comes from a `> run.log` redirect in the parent shell's command line. Bitácora remembers each session's label, result and log paths in its own file, so a finished run still shows them.
 
-Both interfaces read sessions in a separate process. The desktop app uses packaged local HTML, CSS and JavaScript with a narrow Python bridge; it does not run a terminal server. Reader failures and stale data are shown, and changed events are synchronized without duplicating the feed.
+Both interfaces read sessions in a separate process. The desktop app uses packaged local HTML, CSS and JavaScript with a narrow Python bridge; it does not run a terminal server. Reader failures and stale data are shown, records a provider could not read are counted in the header and in Details, and changed events are synchronized without duplicating the feed.
+
+Each provider has a support tier; [the support matrix](docs/support-matrix.md) lists what each one can answer. To leave one out, add `[providers]` with `opencode = false` (or `codex`, `claude`) to `config.toml`.
 
 ## Privacy
 
-Everything stays on your machine. Bitácora itself makes no requests to external services. `bitacora --diagnostics` prints aggregate counters, latencies and memory use for the local machine and exits; it includes no message text, commands or file paths, and sends nothing over the network. The desktop interface and its assets are embedded locally, without an HTTP or WebSocket application server. It never writes to the agents' files. Stopping an agent requires confirmation and checks that the process identity still matches. Its own files hold your preferences, session labels, file paths and observed command lines; `bitacora --paths` shows where.
+Everything stays on your machine. Bitácora itself makes no requests to external services. `bitacora --diagnostics` prints aggregate counters, latencies and memory use for the local machine and exits; it includes no message text, commands or file paths, and sends nothing over the network. The desktop interface and its assets are embedded locally, without an HTTP or WebSocket application server. It never writes to the agents' files: OpenCode's database is opened read-only, never leaves files next to it, and only its session tables are read. Stopping an agent requires confirmation and checks that the process identity still matches. Its own files hold your preferences, session labels, file paths and observed command lines; `bitacora --paths` shows where.
 ## Limits
 
-- Neither format is documented, and both change between versions. This release was tested with Codex CLI 0.161 and Claude Code 2.1.
-- The CI matrix covers the terminal app on Windows, Linux and macOS with Python 3.11 and 3.13. The Windows build also has a frozen-app smoke check using generated sessions. Desktop Linux/macOS support is outside the 1.2 support scope.
+- None of the formats are documented, and all of them change between versions. This release was tested with Codex CLI 0.161, Claude Code 2.1 and OpenCode 2.2.4. OpenCode support is best-effort: its database schema changes often.
+- The CI matrix covers the terminal app on Windows, Linux and macOS with Python 3.11 and 3.13. The Windows build also has a frozen-app smoke check using generated sessions. Desktop Linux/macOS support is outside the 1.3 support scope.
 - Reasoning is stored encrypted or not at all, so the activity feed shows how long the agent thought rather than what it thought (Codex includes summaries if `model_reasoning_summary` is on).
 - Claude Code's context window is inferred from known model IDs and marked as assumed in Details. Unknown models show the context token count instead of a percentage.
-- Subagent sessions are not grouped under their parent yet.
+- Subagent sessions are not grouped under their parent yet. OpenCode subagents appear inside the parent's activity instead of as sessions of their own.
+- OpenCode sessions cannot be stopped from Bitácora, their resume command needs `opencode` on `PATH`, and sessions inside WSL or on a remote OpenCode server are not visible.
 
 ## Development
 

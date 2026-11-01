@@ -25,15 +25,26 @@ class Runtime:
 def prepare(args):
     animator = None
     previous = {}
+    providers = None
     with ExitStack() as stack:
         root = None
         if args.demo:
             from bitacora import demo
 
+            # Read the user's switches before BITACORA_HOME moves to the demo home.
+            switches = load_config().providers
             root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="bitacora-demo-")))
             data = demo.generate(root)
-            env = {"CODEX_HOME": str(data["codex_home"]), "CLAUDE_CONFIG_DIR": str(data["claude_home"]),
-                   "BITACORA_HOME": str(root / "home")}
+            providers = all_providers(root / "home", enabled=switches)
+            off = sorted(name for name, on in switches.items() if on is False)
+            if off:
+                # The reader process loads config.toml from the demo home, so the same switches are written there.
+                (root / "home").mkdir(parents=True, exist_ok=True)
+                (root / "home" / "config.toml").write_text(
+                    "[providers]\n" + "".join(f"{name} = false\n" for name in off), encoding="utf-8")
+            env = {p.home_env: str(data["homes"][p.name]) for p in providers
+                   if p.home_env and p.name in data["homes"]}
+            env["BITACORA_HOME"] = str(root / "home")
             previous = {key: os.environ.get(key) for key in env}
             os.environ.update(env)
             memory = Memory()
@@ -51,7 +62,8 @@ def prepare(args):
             hours = args.hours if args.hours is not None else state.get("hours", config.hours)
             config.hours = capped_hours(hours) or 24
             config.notify = bool(state.get("notify", config.notify))
-            yield Runtime(config, state, all_providers(state_path().parent), lang, root)
+            yield Runtime(config, state, providers if providers is not None
+                          else all_providers(state_path().parent, enabled=config.providers), lang, root)
         finally:
             if animator:
                 animator.stop.set()

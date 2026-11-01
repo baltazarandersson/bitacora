@@ -894,6 +894,7 @@
     let cls = "ok";
     let text = "";
     let banner = "";
+    let tip = "";
     let bad = false;
     if (S.bridgeError) {
       cls = "bad";
@@ -918,12 +919,19 @@
         .map((error) => str(error && error.provider)).filter(Boolean).join(", ");
       text = t("desktop_reader_short_partial");
       banner = t("desktop_reader_partial", { providers: providers || "?" });
+    } else if (r.state === "degraded") {
+      cls = "warn";
+      const providers = (Array.isArray(r.degraded) ? r.degraded : [])
+        .map((item) => str(item && item.label) + " (" + (num(item && item.discarded) ?? 0).toLocaleString() + ")")
+        .join(", ");
+      text = t("desktop_reader_short_degraded");
+      tip = t("desktop_reader_degraded", { providers: providers || "?" });
     } else if (num(r.age) !== null) {
       text = t("desktop_reader_ready", { age: fmtDur(r.age) });
     }
     h.className = "health " + cls;
-    h.title = banner || text;
-    h.setAttribute("aria-label", banner || text);
+    h.title = banner || tip || text;
+    h.setAttribute("aria-label", banner || tip || text);
     setText(h, text);
     for (const id of ["banner", "home-banner"]) {
       const b = $(id);
@@ -2106,7 +2114,8 @@
       add("c-red", ev.sub === "aborted" ? t("ev_aborted", { why: text }) : text);
       if (verbose && detail) body.appendChild(block(detail, "err", 14, true));
     } else if (kind === "note") {
-      add("dim", "· " + text);
+      const key = "ev_note_" + str(ev.sub);
+      add("dim", "· " + (ev.sub && has(S.strings, key) ? t(key) : text));
     } else {
       add("c-yellow", "ƒ ");
       add("c-yellow", text);
@@ -3015,7 +3024,7 @@
       });
       list.setAttribute("aria-activedescendant", S.views.length ? "view-" + S.homeHi : "");
     }
-    const none = S.loaded && S.reader.state === "ready" && S.views.length &&
+    const none = S.loaded && (S.reader.state === "ready" || S.reader.state === "degraded") && S.views.length &&
       S.views.every((v) => !(has(vc, v.id) && vc[v.id] && num(vc[v.id].total)));
     const note = $("home-note");
     note.hidden = !none;

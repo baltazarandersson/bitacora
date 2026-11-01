@@ -10,8 +10,8 @@ from pathlib import Path
 
 from bitacora.model import Event, ProcInfo, Run, Session, latest_limit
 from bitacora.procs import Proc
-from bitacora.providers.base import Capabilities, Provider, resume_cwd, resume_value
-from bitacora.util import UUID_RE, access_kind, as_epoch, count_lines, first_line, parse_iso, rel_to
+from bitacora.providers.base import Capabilities, Provider, Support, resume_cwd, resume_value
+from bitacora.util import UUID_RE, as_epoch, count_lines, first_line, parse_iso, rel_to
 
 VALUE_FLAGS = {"--model", "--effort", "--permission-mode", "--output-format", "--input-format",
                "--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools",
@@ -134,8 +134,22 @@ def block_text(content) -> str:
 
 class ClaudeSession(Session):
     provider = "claude"
+    usage_basis = "processed"
+    access_map = {
+        "default": "prompt",
+        "acceptedits": "auto-edit",
+        "plan": "plan",
+        "bypasspermissions": "full-access",
+    }
     skip_markers = (b'"type":"attachment"', b'"type":"file-history', b'"type":"queue-operation"',
                     b'"type":"last-prompt"', b'"type":"atis-latch"')
+    # Known internal records, not unknown formats. skip_markers still filters the noisy ones; the set
+    # covers the future ingest path and documents intent.
+    ignored_types = frozenset({
+        "attachment", "file-history-snapshot", "file-history-delta", "queue-operation", "last-prompt",
+        "atis-latch", "system", "mode", "cost-state", "relocated", "api-request", "api-request-blob",
+        "api-request-shape",
+    })
 
     def reset(self) -> None:
         super().reset()
@@ -146,11 +160,17 @@ class ClaudeSession(Session):
     def handle(self, o: dict) -> None:
         typ = o.get("type")
         for kind, key in TITLE_KEYS:
-            if typ == kind and o.get(key):
-                self._titles[kind] = o[key]
-                self.title = next(self._titles[k] for k, _ in TITLE_KEYS if k in self._titles)
+            if typ == kind:
+                # A known title type with a missing or empty value is a degenerate payload, not an unknown type.
+                if o.get(key):
+                    self._titles[kind] = o[key]
+                    self.title = next(self._titles[k] for k, _ in TITLE_KEYS if k in self._titles)
                 return
-        if typ not in ("user", "assistant") or o.get("isSidechain"):
+        if typ not in ("user", "assistant"):
+            if typ not in self.ignored_types:
+                self.note_unknown()
+            return
+        if o.get("isSidechain"):  # sidechain user/assistant records are known and intentionally ignored
             return
         ts = parse_iso(o.get("timestamp"))
         if ts:
@@ -166,7 +186,7 @@ class ClaudeSession(Session):
             self.headless = ENTRYPOINTS.get(entrypoint, (None, False))[1]
         if o.get("permissionMode"):
             self.sandbox = o["permissionMode"]
-            self.access_kind = access_kind(self.sandbox, self.provider)
+            self.access_kind = self.normalize_access(self.sandbox)
         msg = o.get("message") or {}
         if typ == "user":
             self._user(o, msg, ts)
@@ -363,18 +383,39 @@ class ClaudeProvider(Provider):
     name = "claude"
     label = "Claude Code"
     marker = "claude"
+    home_env = "CLAUDE_CONFIG_DIR"
     session_cls = ClaudeSession
-    capabilities = Capabilities()
+    label_key = "provider_claude"
+    short_label_key = "provider_claude_short"
+    accent = "accent"
+    tier = "verified"
+    verified_versions = ()
+    capabilities = Capabilities(
+        processes=True, history=True, resume=Support.FULL, messages=Support.FULL, commands=Support.FULL,
+        files=Support.FULL, questions=Support.FULL, usage=Support.FULL, context=Support.FULL,
+        quota=Support.PARTIAL, titles=Support.NONE, subagents=Support.NONE,
+    )
     process_names = ("claude", "node", "bun")
 
     def home(self) -> Path:
-        return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+        return Path(os.environ.get(self.home_env) or Path.home() / ".claude")
+
+    def context_window(self, model: str | None) -> int | None:
+        return context_window_for_model(model)
 
     def _projects(self) -> Path:
         return self.home() / "projects"
 
     def available(self) -> bool:
         return self._projects().exists()
+
+    def origin_kind(self, session: Session) -> str:
+        # Historical session branch, raw first: the raw value decides whether the mapped kind is used.
+        if session.origin_raw not in ("?", ""):
+            if session.origin_kind != "other":
+                return session.origin_kind
+            return origin_kind_for_raw(session.origin_raw)
+        return "background" if session.headless else "other"
 
     def procs(self, snap: list[Proc]) -> list[ProcInfo]:
         found = {p.pid: p for p in snap if is_claude_code(p)}

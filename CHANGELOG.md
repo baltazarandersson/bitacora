@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.3.0 (2026-11-01)
+
+### OpenCode
+
+- Read OpenCode sessions from its SQLite database, read-only, with the same statuses, activity, messages, commands with exit codes, file changes, questions, limits, token totals and resume command as the other providers. Tested with OpenCode 2.2.4; support is best-effort because its schema changes often.
+- Show an OpenCode session as running while its database marks it busy and it was updated recently. OpenCode's desktop app and CLI share one background service, so sessions have no process of their own: Details says so, mentions the shared service when it is running, and Stop stays unavailable.
+- Keep subagent and archived sessions out of the list; subagent work shows inside the parent's activity. Read channel databases next to the main one, or the one `OPENCODE_DB` names.
+- Never write next to the database: when OpenCode is not running it is opened immutable, so no `-wal` or `-shm` file appears. Only the session tables are queried.
+- Add three generated OpenCode sessions to `--demo`.
+
+### Providers
+
+- Turn a provider off with a `[providers]` table in `config.toml`, for example `opencode = false`.
+- Count records a provider could not read. The header shows "records skipped" with the provider and count in its tooltip, Details shows how the selected session's source was read, and a provider read error appears in the partial-reader notice. Providers that are not installed stay silent.
+- `--diagnostics` reports each provider's support tier and verified versions, and lists disabled providers.
+- Add a support matrix that lists what each provider can answer, its tier and the versions tested.
+- Move provider names, colors, origins, access modes, usage basis and context windows into each provider, so a new provider no longer needs changes in the interfaces.
+
+### Fixes
+
+- Quote typographic apostrophes in the folder of a PowerShell resume command, so a folder such as `Ana’s app` no longer breaks the copied command.
+- A deleted session file no longer hides a provider whose other sessions had unreadable records.
+- Draw the block art in the README home screenshot as exact rectangles, so its letters and lighthouse no longer show seams.
+
 ## 1.2.0 (2026-10-29)
 
 ### Reliability

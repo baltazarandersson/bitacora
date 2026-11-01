@@ -1,0 +1,787 @@
+{
+  "runs": [
+    {
+      "context_tokens": 100,
+      "ctx_window": null,
+      "effort": null,
+      "events": [
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "turn",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "started",
+          "text": ""
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "Draft the changelog entries",
+          "kind": "user",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "Draft the changelog entries"
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "Drafting the entries",
+          "kind": "msg",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "Drafting the entries"
+        }
+      ],
+      "files": [],
+      "first_prompt": "Draft the changelog entries",
+      "headless": false,
+      "label": "Draft the changelog",
+      "last_agent_message": "",
+      "messages": [
+        "Draft the changelog entries",
+        "Drafting the entries"
+      ],
+      "model": null,
+      "n_cmds": 0,
+      "n_fail": 0,
+      "n_files": 0,
+      "open_questions": [],
+      "origin": "?",
+      "origin_kind": "other",
+      "origin_raw": "?",
+      "provider": "opencode",
+      "repo": "notes",
+      "state": "running",
+      "status": "running",
+      "title": "Draft the changelog",
+      "tokens": 110,
+      "usage_basis": "reported"
+    },
+    {
+      "context_tokens": 150,
+      "ctx_window": null,
+      "effort": null,
+      "events": [
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "turn",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "started",
+          "text": ""
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "Summarize the logs",
+          "kind": "user",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "Summarize the logs"
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "Two errors and one retry in the logs.",
+          "kind": "msg",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "Two errors and one retry in the logs."
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "turn",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "complete",
+          "text": ""
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "err",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "rate_limit"
+        }
+      ],
+      "files": [],
+      "first_prompt": "Summarize the logs",
+      "headless": false,
+      "label": "Summarize the logs",
+      "last_agent_message": "Two errors and one retry in the logs.",
+      "messages": [
+        "Summarize the logs",
+        "Two errors and one retry in the logs."
+      ],
+      "model": "model-gamma",
+      "n_cmds": 0,
+      "n_fail": 0,
+      "n_files": 0,
+      "open_questions": [],
+      "origin": "?",
+      "origin_kind": "other",
+      "origin_raw": "?",
+      "provider": "opencode",
+      "repo": "logs-app",
+      "state": "limited",
+      "status": "limited",
+      "title": "Summarize the logs",
+      "tokens": 340,
+      "usage_basis": "reported"
+    },
+    {
+      "context_tokens": 4000,
+      "ctx_window": null,
+      "effort": null,
+      "events": [
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "turn",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "started",
+          "text": ""
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "Keep going with the migration",
+          "kind": "user",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "Keep going with the migration"
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "note",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "compacted",
+          "text": "context compacted"
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "note",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "Skill loaded: migrations"
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "Migration continues with the next table.",
+          "kind": "msg",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "Migration continues with the next table."
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "turn",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "complete",
+          "text": ""
+        }
+      ],
+      "files": [],
+      "first_prompt": "Keep going with the migration",
+      "headless": false,
+      "label": "Long session",
+      "last_agent_message": "Migration continues with the next table.",
+      "messages": [
+        "Keep going with the migration",
+        "Migration continues with the next table."
+      ],
+      "model": null,
+      "n_cmds": 0,
+      "n_fail": 0,
+      "n_files": 0,
+      "open_questions": [],
+      "origin": "?",
+      "origin_kind": "other",
+      "origin_raw": "?",
+      "provider": "opencode",
+      "repo": "long-app",
+      "state": "complete",
+      "status": "your_turn",
+      "title": "Long session",
+      "tokens": 4300,
+      "usage_basis": "reported"
+    },
+    {
+      "context_tokens": 465,
+      "ctx_window": null,
+      "effort": "deep",
+      "events": [
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "turn",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "started",
+          "text": ""
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "Fix the parser so the tests pass",
+          "kind": "user",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "Fix the parser so the tests pass"
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "The parser splits on commas only.",
+          "kind": "think",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": ""
+        },
+        {
+          "code": "0",
+          "count": 1,
+          "detail": "12 passed",
+          "kind": "cmd",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "npm test"
+        },
+        {
+          "code": "2",
+          "count": 1,
+          "detail": "1 failed",
+          "kind": "cmd",
+          "minus": 0,
+          "ok": false,
+          "plus": 0,
+          "sub": "",
+          "text": "pytest -q tests/test_parser.py"
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": " M src/parser.py",
+          "kind": "cmd",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "git status --short"
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "def split(line):",
+          "kind": "cmd",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "read",
+          "text": "src/parser.py"
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "parser.py:1",
+          "kind": "cmd",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "search",
+          "text": "split src"
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "src/parser.py",
+          "kind": "cmd",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "list_files",
+          "text": "**/*.py"
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "file",
+          "minus": 2,
+          "ok": true,
+          "plus": 4,
+          "sub": "update",
+          "text": "src/parser.py"
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "def test_split():\n    assert True\n",
+          "kind": "file",
+          "minus": 0,
+          "ok": true,
+          "plus": 2,
+          "sub": "add",
+          "text": "tests/test_parser.py"
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "The parser now splits quoted commas and the tests pass.",
+          "kind": "msg",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "The parser now splits quoted commas and the tests pass."
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "turn",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "complete",
+          "text": ""
+        }
+      ],
+      "files": [
+        {
+          "count": 1,
+          "kind": "update",
+          "minus": 2,
+          "path": "src/parser.py",
+          "plus": 4
+        },
+        {
+          "count": 1,
+          "kind": "add",
+          "minus": 0,
+          "path": "tests/test_parser.py",
+          "plus": 2
+        }
+      ],
+      "first_prompt": "Fix the parser so the tests pass",
+      "headless": false,
+      "label": "Fix the parser",
+      "last_agent_message": "The parser now splits quoted commas and the tests pass.",
+      "messages": [
+        "Fix the parser so the tests pass",
+        "The parser now splits quoted commas and the tests pass."
+      ],
+      "model": "model-beta",
+      "n_cmds": 6,
+      "n_fail": 1,
+      "n_files": 2,
+      "open_questions": [],
+      "origin": "?",
+      "origin_kind": "other",
+      "origin_raw": "?",
+      "provider": "opencode",
+      "repo": "demo-app",
+      "state": "complete",
+      "status": "your_turn",
+      "title": "Fix the parser",
+      "tokens": 860,
+      "usage_basis": "reported"
+    },
+    {
+      "context_tokens": 50,
+      "ctx_window": null,
+      "effort": null,
+      "events": [
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "turn",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "started",
+          "text": ""
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "Run the long build",
+          "kind": "user",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "Run the long build"
+        }
+      ],
+      "files": [],
+      "first_prompt": "Run the long build",
+      "headless": false,
+      "label": "Run the long build",
+      "last_agent_message": "",
+      "messages": [
+        "Run the long build"
+      ],
+      "model": null,
+      "n_cmds": 0,
+      "n_fail": 0,
+      "n_files": 0,
+      "open_questions": [],
+      "origin": "?",
+      "origin_kind": "other",
+      "origin_raw": "?",
+      "provider": "opencode",
+      "repo": "build-app",
+      "state": "running",
+      "status": "running",
+      "title": "Run the long build",
+      "tokens": 55,
+      "usage_basis": "reported"
+    },
+    {
+      "context_tokens": 50,
+      "ctx_window": null,
+      "effort": null,
+      "events": [
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "turn",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "started",
+          "text": ""
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "Start the old build",
+          "kind": "user",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "Start the old build"
+        }
+      ],
+      "files": [],
+      "first_prompt": "Start the old build",
+      "headless": false,
+      "label": "Old build",
+      "last_agent_message": "",
+      "messages": [
+        "Start the old build"
+      ],
+      "model": null,
+      "n_cmds": 0,
+      "n_fail": 0,
+      "n_files": 0,
+      "open_questions": [],
+      "origin": "?",
+      "origin_kind": "other",
+      "origin_raw": "?",
+      "provider": "opencode",
+      "repo": "stale-app",
+      "state": "running",
+      "status": "quiet",
+      "title": "Old build",
+      "tokens": 55,
+      "usage_basis": "reported"
+    },
+    {
+      "context_tokens": 90,
+      "ctx_window": null,
+      "effort": null,
+      "events": [
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "turn",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "started",
+          "text": ""
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "Pick a release name",
+          "kind": "user",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "Pick a release name"
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "Which branch should I target?",
+          "kind": "ask",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "question",
+          "text": "Which branch should I target?"
+        }
+      ],
+      "files": [],
+      "first_prompt": "Pick a release name",
+      "headless": false,
+      "label": "Pick the release name",
+      "last_agent_message": "",
+      "messages": [
+        "Pick a release name"
+      ],
+      "model": null,
+      "n_cmds": 0,
+      "n_fail": 0,
+      "n_files": 0,
+      "open_questions": [
+        "call_q1"
+      ],
+      "origin": "?",
+      "origin_kind": "other",
+      "origin_raw": "?",
+      "provider": "opencode",
+      "repo": "demo-app",
+      "state": "running",
+      "status": "asking",
+      "title": "Pick the release name",
+      "tokens": 100,
+      "usage_basis": "reported"
+    },
+    {
+      "context_tokens": null,
+      "ctx_window": null,
+      "effort": null,
+      "events": [
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "turn",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "started",
+          "text": ""
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "Call the API",
+          "kind": "user",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "Call the API"
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "err",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "Upstream model failed"
+        }
+      ],
+      "files": [],
+      "first_prompt": "Call the API",
+      "headless": false,
+      "label": "Call the API",
+      "last_agent_message": "",
+      "messages": [
+        "Call the API"
+      ],
+      "model": null,
+      "n_cmds": 0,
+      "n_fail": 0,
+      "n_files": 0,
+      "open_questions": [],
+      "origin": "?",
+      "origin_kind": "other",
+      "origin_raw": "?",
+      "provider": "opencode",
+      "repo": "api-app",
+      "state": "failed",
+      "status": "failed",
+      "title": "Call the API",
+      "tokens": 20,
+      "usage_basis": "reported"
+    },
+    {
+      "context_tokens": null,
+      "ctx_window": null,
+      "effort": null,
+      "events": [
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "turn",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "started",
+          "text": ""
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "Hello",
+          "kind": "user",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "Hello"
+        }
+      ],
+      "files": [],
+      "first_prompt": "Hello",
+      "headless": false,
+      "label": "Hello",
+      "last_agent_message": "",
+      "messages": [
+        "Hello"
+      ],
+      "model": null,
+      "n_cmds": 0,
+      "n_fail": 0,
+      "n_files": 0,
+      "open_questions": [],
+      "origin": "?",
+      "origin_kind": "other",
+      "origin_raw": "?",
+      "provider": "opencode",
+      "repo": "other-app",
+      "state": "running",
+      "status": "running",
+      "title": "",
+      "tokens": 30,
+      "usage_basis": "reported"
+    },
+    {
+      "context_tokens": null,
+      "ctx_window": null,
+      "effort": null,
+      "events": [
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "turn",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "started",
+          "text": ""
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "Please refactor the demo",
+          "kind": "user",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "",
+          "text": "Please refactor the demo"
+        },
+        {
+          "code": null,
+          "count": 1,
+          "detail": "",
+          "kind": "note",
+          "minus": 0,
+          "ok": true,
+          "plus": 0,
+          "sub": "compacted",
+          "text": "context compacted"
+        }
+      ],
+      "files": [],
+      "first_prompt": "Please refactor the demo",
+      "headless": false,
+      "label": "Refactor the demo app",
+      "last_agent_message": "",
+      "messages": [
+        "Please refactor the demo"
+      ],
+      "model": "model-alpha",
+      "n_cmds": 0,
+      "n_fail": 0,
+      "n_files": 0,
+      "open_questions": [],
+      "origin": "?",
+      "origin_kind": "other",
+      "origin_raw": "?",
+      "provider": "opencode",
+      "repo": "demo-app",
+      "state": "running",
+      "status": "running",
+      "title": "Refactor the demo app",
+      "tokens": 1590,
+      "usage_basis": "reported"
+    }
+  ]
+}

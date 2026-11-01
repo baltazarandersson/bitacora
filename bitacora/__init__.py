@@ -1,3 +1,3 @@
 """Bitácora: a live dashboard for coding agents working in the background."""
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"

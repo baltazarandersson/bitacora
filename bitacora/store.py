@@ -120,6 +120,7 @@ class Config:
     hours: float = 24
     notify: bool = True
     views: dict[str, dict] = field(default_factory=dict)
+    providers: dict[str, bool] = field(default_factory=dict)  # [providers] switches; a missing name stays enabled
     errors: list[str] = field(default_factory=list)
 
 
@@ -150,7 +151,26 @@ def load_config(path: Path | None = None) -> Config:
     views = raw.get("views")
     if isinstance(views, dict):
         cfg.views = {k: v for k, v in views.items() if isinstance(v, dict)}
+    if "providers" in raw:
+        _read_provider_switches(raw["providers"], cfg, path)
     return cfg
+
+
+def _read_provider_switches(table, cfg: Config, path: Path) -> None:
+    """[providers] name = true|false. Unknown names and non-boolean values are ignored and reported."""
+    if not isinstance(table, dict):
+        cfg.errors.append(f"{path}: [providers] must be a table, ignored")
+        return
+    from bitacora.providers import all_providers  # imported here so this module does not load every provider
+
+    known = {provider.name for provider in all_providers()}
+    for name, value in table.items():
+        if name not in known:
+            cfg.errors.append(f"{path}: [providers] unknown provider {name!r}, ignored")
+        elif not isinstance(value, bool):
+            cfg.errors.append(f"{path}: [providers] {name} must be true or false, ignored")
+        else:
+            cfg.providers[name] = value
 
 
 class _JsonFile:

@@ -13,8 +13,8 @@ from pathlib import Path
 
 from bitacora.model import Event, ProcInfo, Run, Session, latest_limit
 from bitacora.procs import Proc
-from bitacora.providers.base import Capabilities, Provider, resume_cwd, resume_value
-from bitacora.util import UUID_RE, access_kind, as_epoch, first_line, norm_path, parse_iso, rel_to, same_path
+from bitacora.providers.base import Capabilities, Provider, Support, resume_cwd, resume_value
+from bitacora.util import UUID_RE, as_epoch, first_line, norm_path, parse_iso, rel_to, same_path
 
 NAME_TS_RE = re.compile(r"rollout-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-")
 VALUE_FLAGS = {"-m", "--model", "-c", "--config", "-s", "--sandbox", "-C", "--cd", "-o",
@@ -174,9 +174,21 @@ def exhausted_window(rate_limits: dict | None, now: float) -> dict | None:
 
 class CodexSession(Session):
     provider = "codex"
+    usage_basis = "reported"
+    access_map = {
+        "read-only": "read-only",
+        "workspace-write": "workspace-write",
+        "prompt": "prompt",
+        "auto-edit": "auto-edit",
+        "plan": "plan",
+        "danger-full-access": "full-access",
+        "full-access": "full-access",
+    }
     # response_item lines repeat what item_completed already reports; only function calls matter.
     skip_markers = (b'"type":"response_item"', b'"type":"world_state"', b'"type":"token_usage_record"')
     keep_markers = (b'"function_call',)
+    # Already filtered by skip_markers; the set documents them for the future ingest path.
+    ignored_types = frozenset({"world_state", "token_usage_record"})
 
     def handle(self, o: dict) -> None:
         typ = o.get("type")
@@ -200,13 +212,17 @@ class CodexSession(Session):
             sandbox = (p.get("sandbox_policy") or {}).get("type")
             if sandbox:
                 self.sandbox = sandbox
-                self.access_kind = access_kind(sandbox, self.provider)
+                self.access_kind = self.normalize_access(sandbox)
             return
         if typ == "response_item":
             self._response_item(p, ts)
             return
         if typ != "event_msg":
+            if typ not in self.ignored_types:
+                self.note_unknown()
             return
+        # The envelope is known; a new payload subtype is not a top-level format change and is
+        # revisited when health thresholds exist.
         et = p.get("type")
         if et == "item_completed":
             self._item(p.get("item") or {}, ts)
@@ -335,8 +351,18 @@ class CodexProvider(Provider):
     name = "codex"
     label = "Codex"
     marker = "codex"
+    home_env = "CODEX_HOME"
     session_cls = CodexSession
-    capabilities = Capabilities(titles=True)
+    label_key = "provider_codex"
+    short_label_key = "provider_codex_short"
+    accent = "secondary"
+    tier = "verified"
+    verified_versions = ()
+    capabilities = Capabilities(
+        processes=True, history=True, resume=Support.FULL, messages=Support.FULL, commands=Support.FULL,
+        files=Support.FULL, questions=Support.FULL, usage=Support.FULL, context=Support.FULL,
+        quota=Support.FULL, titles=Support.FULL, subagents=Support.NONE,
+    )
     process_names = ("codex",)
     WALK_SECS = 120
     CHECKPOINT_NAME = "codex-index.json"
@@ -353,7 +379,7 @@ class CodexProvider(Provider):
         self._saved_rows: str | None = None
 
     def home(self) -> Path:
-        return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        return Path(os.environ.get(self.home_env) or Path.home() / ".codex")
 
     def title(self, session: Session) -> str | None:
         """Thread names live in session_index.jsonl (one JSON object per rename)."""
@@ -377,6 +403,14 @@ class CodexProvider(Provider):
                 return None
             self._index, self._index_mtime = names, mtime
         return self._index.get(session.session_id or "")
+
+    def origin_kind(self, session: Session) -> str:
+        # Historical session branch, raw first: the raw value decides whether the mapped kind is used.
+        if session.origin_raw not in ("?", ""):
+            if session.origin_kind != "other":
+                return session.origin_kind
+            return origin_kind_for_raw(session.origin_raw)
+        return "background" if session.headless else "other"
 
     def _session_dirs(self) -> list[Path]:
         return [self.home() / "sessions", self.home() / "archived_sessions"]

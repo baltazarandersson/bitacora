@@ -2,7 +2,7 @@
 
 [English](https://github.com/baltazarandersson/bitacora/blob/main/README.md) · **Español**
 
-Un monitor local para agentes de código. Sigue corridas en segundo plano y sesiones interactivas de Codex y Claude Code.
+Un monitor local para agentes de código. Sigue corridas en segundo plano y sesiones interactivas de Codex, Claude Code y OpenCode.
 
 Bitácora tiene una app de escritorio para Windows y una interfaz de terminal para Windows, Linux y macOS. Ambas comparten el lector de sesiones y mantienen actividad, mensajes, archivos, logs, resultados, cuotas y configuración.
 
@@ -35,16 +35,16 @@ Para probarlo sin tener ningún agente instalado:
 uvx bitacora --demo
 ```
 
-El build de Windows de 1.2 distribuye un único ejecutable público, `bitacora.exe`, que abre la app de escritorio sin Python ni consola. Puedes descargarlo desde la [última página de releases](https://github.com/baltazarandersson/bitacora/releases/latest). Requiere Microsoft Edge WebView2 Runtime. No está firmado, así que SmartScreen podría avisarte la primera vez.
+El build de Windows distribuye un único ejecutable público, `bitacora.exe`, que abre la app de escritorio sin Python ni consola. Puedes descargarlo desde la [última página de releases](https://github.com/baltazarandersson/bitacora/releases/latest). Requiere Microsoft Edge WebView2 Runtime. No está firmado, así que SmartScreen podría avisarte la primera vez.
 
-Si instalas con Python, agrega `pip install "bitacora[window]"` y ejecuta `bitacora --window`. El escritorio de 1.2 apunta a Windows; la terminal sigue disponible en los tres sistemas.
+Si instalas con Python, agrega `pip install "bitacora[window]"` y ejecuta `bitacora --window`. El escritorio de 1.3 apunta a Windows; la terminal sigue disponible en los tres sistemas.
 
 ## Qué muestra
 
 - Cada sesión con su estado: pregunta, iniciando, en curso, en silencio, te toca, terminada, fallida, límite alcanzado, detenida o desconocida.
 - La actividad de cada sesión: comandos con su código de salida, archivos editados con líneas agregadas y quitadas, mensajes, y cuánto pensó el agente antes de cada paso.
 - Pestañas para los mensajes, los archivos tocados, el log de la corrida, su archivo de resultado y todos los datos de la sesión.
-- El contexto de la llamada más reciente al modelo, como porcentaje cuando se conoce la ventana y, si no, como cantidad de tokens. Total es acumulativo: Claude Code cuenta los tokens procesados de prompt y salida, incluido el uso de caché; Codex muestra el total informado por el agente. Las cuotas muestran el porcentaje de uso o el estado restablecido, y los datos desconocidos siguen como desconocidos.
+- El contexto de la llamada más reciente al modelo, como porcentaje cuando se conoce la ventana y, si no, como cantidad de tokens. Total es acumulativo: Claude Code cuenta los tokens procesados de prompt y salida, incluido el uso de caché; Codex y OpenCode muestran el total que informa el agente. Las cuotas muestran el porcentaje de uso o el estado restablecido, y los datos desconocidos siguen como desconocidos.
 - Un aviso cuando una corrida termina, se corta o te pregunta algo.
 - Acciones sobre la corrida seleccionada: detenerla (te pide confirmación), abrir su resultado o su log (los formatos de texto admitidos se abren en la aplicación del sistema), copiar el comando que la retoma.
 
@@ -131,21 +131,25 @@ Bitácora solo lee archivos que los agentes ya escriben.
 
 - **Codex**: los rollouts en `~/.codex/sessions` (o `$CODEX_HOME`), los nombres de los threads en `session_index.jsonl`, y los procesos `codex exec` / `codex` con sus flags (`-m`, `-c`, `-C`, `-s`, `-o`, `resume <id>`).
 - **Claude Code**: las transcripciones en `~/.claude/projects` (o `$CLAUDE_CONFIG_DIR`) y los procesos `claude` con `--resume`, `--session-id`, `--model`, `-p`.
+- **OpenCode**: la base de datos de sesiones `~/.local/share/opencode/opencode.db` (o `$OPENCODE_DB`), abierta en solo lectura. La app de escritorio y la CLI comparten un único servicio en segundo plano, así que las sesiones de OpenCode no tienen un proceso propio: una sesión figura en curso mientras la base la marca ocupada y con cambios recientes.
 
 Cada proceso vivo se empareja con su sesión por id cuando la línea de comandos lo trae, y si no, por carpeta de trabajo y hora de inicio. El log sale de una redirección `> run.log` en la línea de comandos del shell padre. Bitácora guarda el nombre, el resultado y el log de cada sesión en su propio archivo, así una corrida terminada los sigue mostrando.
 
-Ambas interfaces leen las sesiones en un proceso aparte. La app de escritorio usa HTML, CSS y JavaScript locales con un puente acotado a Python; no ejecuta un servidor de terminal. Los errores del lector y los datos desactualizados se muestran, y los cambios de eventos se sincronizan sin duplicar la actividad.
+Ambas interfaces leen las sesiones en un proceso aparte. La app de escritorio usa HTML, CSS y JavaScript locales con un puente acotado a Python; no ejecuta un servidor de terminal. Los errores del lector y los datos desactualizados se muestran, los registros que un proveedor no pudo leer se cuentan en la cabecera y en Detalles, y los cambios de eventos se sincronizan sin duplicar la actividad.
+
+Cada proveedor tiene un nivel de soporte; [la matriz de soporte](docs/support-matrix.md) detalla qué puede responder cada uno (en inglés). Para dejar uno afuera, agrega `[providers]` con `opencode = false` (o `codex`, `claude`) en `config.toml`.
 
 ## Privacidad
 
-Todo queda en tu máquina. Bitácora no hace pedidos a servicios externos. `bitacora --diagnostics` imprime contadores agregados, latencias y uso de memoria de la máquina local y sale; no incluye texto de mensajes, comandos ni rutas, y no envía nada por la red. La interfaz de escritorio y sus recursos se cargan localmente, sin servidor de aplicación HTTP ni WebSocket. Nunca escribe en los archivos de los agentes. Detener un agente requiere confirmación y verifica que la identidad del proceso siga coincidiendo. Sus archivos guardan tus preferencias, nombres de sesiones, rutas y líneas de comandos observadas; `bitacora --paths` te muestra dónde.
+Todo queda en tu máquina. Bitácora no hace pedidos a servicios externos. `bitacora --diagnostics` imprime contadores agregados, latencias y uso de memoria de la máquina local y sale; no incluye texto de mensajes, comandos ni rutas, y no envía nada por la red. La interfaz de escritorio y sus recursos se cargan localmente, sin servidor de aplicación HTTP ni WebSocket. Nunca escribe en los archivos de los agentes: la base de OpenCode se abre en solo lectura, sin dejar archivos al lado, y solo se leen sus tablas de sesiones. Detener un agente requiere confirmación y verifica que la identidad del proceso siga coincidiendo. Sus archivos guardan tus preferencias, nombres de sesiones, rutas y líneas de comandos observadas; `bitacora --paths` te muestra dónde.
 ## Límites
 
-- Ninguno de los dos formatos está documentado, y los dos cambian entre versiones. Esta versión se probó con Codex CLI 0.161 y Claude Code 2.1.
-- La matriz de CI cubre la terminal en Windows, Linux y macOS con Python 3.11 y 3.13. El build de Windows también tiene una prueba de arranque de la app empaquetada con sesiones generadas. El escritorio en Linux/macOS queda fuera del soporte de 1.2.
+- Ninguno de los formatos está documentado, y todos cambian entre versiones. Esta versión se probó con Codex CLI 0.161, Claude Code 2.1 y OpenCode 2.2.4. El soporte de OpenCode es de mejor esfuerzo: el esquema de su base cambia seguido.
+- La matriz de CI cubre la terminal en Windows, Linux y macOS con Python 3.11 y 3.13. El build de Windows también tiene una prueba de arranque de la app empaquetada con sesiones generadas. El escritorio en Linux/macOS queda fuera del soporte de 1.3.
 - El razonamiento se guarda cifrado o no se guarda, así que la actividad muestra cuánto pensó el agente y no qué pensó (Codex incluye resúmenes si `model_reasoning_summary` está activo).
 - La ventana de contexto de Claude Code se infiere de los IDs de modelo conocidos y se marca como supuesta en Detalles. Los modelos desconocidos muestran la cantidad de tokens de contexto en vez de un porcentaje.
-- Las sesiones de subagentes todavía no se agrupan bajo su sesión madre.
+- Las sesiones de subagentes todavía no se agrupan bajo su sesión madre. Los subagentes de OpenCode aparecen dentro de la actividad de la sesión madre, no como sesiones propias.
+- Las sesiones de OpenCode no se pueden detener desde Bitácora, su comando para retomarlas necesita `opencode` en el `PATH`, y las sesiones dentro de WSL o en un servidor remoto de OpenCode no se ven.
 
 ## Desarrollo
 

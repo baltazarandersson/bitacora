@@ -1,4 +1,5 @@
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -6,7 +7,7 @@ import pytest
 from bitacora.collector import Collector
 from bitacora.model import ProcInfo, Session
 from bitacora.providers import Provider, all_providers
-from bitacora.providers.base import Capabilities
+from bitacora.providers.base import Capabilities, Support
 from bitacora.store import Memory
 from bitacora.views import BUILTIN, all_views, counts, custom_view
 
@@ -21,7 +22,7 @@ def collect(demo_env):
 
 def test_statuses_and_labels(demo_env):
     c, runs = collect(demo_env)
-    assert len(runs) == 16
+    assert len(runs) == 19  # 16 Codex and Claude runs and 3 OpenCode runs
     assert {r.status for r in runs.values()} == {
         "asking", "running", "done", "stopped", "limited", "quiet", "failed", "your_turn", "unknown",
     }
@@ -58,7 +59,7 @@ def test_live_sessions_sort_first(demo_env):
     ordered = c.collect()
     live = [r.live for r in ordered]
     assert live == sorted(live, reverse=True)
-    assert sum(live) == 4
+    assert sum(live) == 5  # the running OpenCode session is live too
 
 
 def test_history_window(demo_env):
@@ -66,14 +67,14 @@ def test_history_window(demo_env):
     c = Collector(all_providers(), state, hours=1, scan_procs=False)
     labels = {r.label for r in c.collect()}
     assert "Fix login redirect loop" not in labels  # 7h old
-    assert len(labels) == 6
+    assert len(labels) == 7  # the running OpenCode session is inside the hour
 
 
 def test_builtin_view_counts(demo_env):
     _, runs = collect(demo_env)
     rs = list(runs.values())
     got = {v.id: counts(v, rs) for v in BUILTIN}
-    assert got == {"background": (9, 3), "everything": (16, 4), "interactive": (7, 1), "live": (4, 4)}
+    assert got == {"background": (9, 3), "everything": (19, 5), "interactive": (10, 2), "live": (5, 5)}
 
 
 def test_custom_views():
@@ -89,7 +90,7 @@ def test_packer_sends_only_what_changed(demo_env):
     c = Collector(all_providers(), Memory(), hours=24, scan_procs=False)
     packer, mirror = Packer(), Mirror()
     first = mirror.apply(packer.pack(c.collect(), c.quotas))
-    assert len(first) == 16
+    assert len(first) == 19
     live = next(r for r in first if r.label.startswith("Update CHANGELOG"))
     n_events = len(live.session.events)
     demo_env["live"][1].say("one more line")  # the Claude run writes a message
@@ -111,8 +112,8 @@ def test_packer_resends_a_new_session_object_for_the_same_file(demo_env):
     first = mirror.apply(packer.pack(c.collect(), c.quotas))
     live = {r.key: r for r in first}
     assert live
-    for path in list(c.sessions):  # drop the cache: the next collection builds fresh Session objects
-        c.sessions[path].gen = -1
+    for key in list(c.sessions):  # drop the cache: the next collection builds fresh Session objects
+        c.sessions[key].gen = -1
     again = mirror.apply(packer.pack(c.collect(), c.quotas))
     for r in again:
         if r.session is not None:
@@ -124,6 +125,11 @@ class SilentProvider(Provider):
 
     name = "silent"
     label = "Silent"
+    capabilities = Capabilities(
+        processes=True, history=False, resume=Support.NONE, messages=Support.NONE, commands=Support.NONE,
+        files=Support.NONE, questions=Support.NONE, usage=Support.NONE, context=Support.NONE,
+        quota=Support.NONE, titles=Support.NONE, subagents=Support.NONE,
+    )
 
     def __init__(self, procs_):
         self._procs = procs_
@@ -169,6 +175,12 @@ class RecordingSession(Session):
 
 class SwitchProvider(Provider):
     """A provider whose data and failures each test controls."""
+
+    capabilities = Capabilities(
+        processes=True, history=True, resume=Support.NONE, messages=Support.NONE, commands=Support.NONE,
+        files=Support.NONE, questions=Support.NONE, usage=Support.NONE, context=Support.NONE,
+        quota=Support.FULL, titles=Support.NONE, subagents=Support.NONE,
+    )
 
     def __init__(self, name, home, paths=(), procs_now=(), fail=(), quota=None):
         self.name = name
@@ -236,11 +248,11 @@ def test_processes_capability_controls_snapshot_names_and_live_runs(tmp_path, mo
     scanning = SwitchProvider("codex", tmp_path,
                               procs_now=[ProcInfo("codex", 42, now - 30, ["codexbin"])])
     scanning.process_names = ("codexbin",)
-    scanning.capabilities = Capabilities(processes=True)
+    scanning.capabilities = replace(SwitchProvider.capabilities, processes=True)
     skipped = SwitchProvider("claude", tmp_path,
                              procs_now=[ProcInfo("claude", 43, now - 30, ["claudebin"])])
     skipped.process_names = ("claudebin",)
-    skipped.capabilities = Capabilities(processes=False)
+    skipped.capabilities = replace(SwitchProvider.capabilities, processes=False)
 
     def must_not_scan(_snap):
         pytest.fail("a provider without processes must not be asked for them")
@@ -267,7 +279,7 @@ def test_history_failure_keeps_live_runs_and_claimed_sessions(tmp_path):
 
     runs = collector.collect()
     assert [run.proc.pid for run in runs] == [42]
-    assert collector.sessions[live_path].records == [{"value": 1}]
+    assert collector.sessions[("codex", live_path)].records == [{"value": 1}]
     assert collector.errors == {"codex": "RuntimeError"}
 
 
@@ -308,7 +320,7 @@ def test_history_failure_keeps_the_last_good_runs(tmp_path):
     runs = collector.collect()
     # The failed provider keeps its last good run and session; the healthy provider is untouched.
     assert {(run.provider, run.label) for run in runs} == {("codex", "history"), ("claude", "other")}
-    assert history_path in collector.sessions and other_path in collector.sessions
+    assert ("codex", history_path) in collector.sessions and ("claude", other_path) in collector.sessions
     assert collector.errors == {"codex": "RuntimeError"}
 
 
@@ -333,7 +345,7 @@ def test_a_failing_process_scan_keeps_the_last_live_run_without_duplicates(tmp_p
     third = collector.collect()
     assert [run.key for run in third] == ["codex:pid42"] and third[0].live
     assert third[0] is first[0]
-    assert live_path in collector.sessions
+    assert ("codex", live_path) in collector.sessions
     assert collector.errors == {"codex": "RuntimeError"}
 
 
@@ -362,6 +374,11 @@ def test_process_pid_reuse_invalidates_cached_transcript(tmp_path):
         label = "Codex"
         marker = "codex"
         session_cls = Session
+        capabilities = Capabilities(
+            processes=True, history=False, resume=Support.NONE, messages=Support.NONE, commands=Support.NONE,
+            files=Support.NONE, questions=Support.NONE, usage=Support.NONE, context=Support.NONE,
+            quota=Support.NONE, titles=Support.NONE, subagents=Support.NONE,
+        )
 
         def __init__(self, paths):
             self.paths = paths
@@ -399,3 +416,297 @@ def test_process_pid_reuse_invalidates_cached_transcript(tmp_path):
     collector.collect()
     assert provider.matches == 2
     assert collector.pid_map == {("codex", 77, 200.0): second_path}
+
+
+class CountingReader:
+    def __init__(self, ref, session):
+        self.ref = ref
+        self._session = session
+        self.updates = 0
+
+    def update(self):
+        self.updates += 1
+        return self._session.update()
+
+    def session(self):
+        return self._session
+
+    def checkpoint(self):
+        return {}
+
+    def health(self):
+        from bitacora.sources import ReaderHealth
+        return ReaderHealth("ok")
+
+
+class ReaderProvider(SwitchProvider):
+    """Counts readers opened and updates received."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.opened = []
+
+    def open(self, ref):
+        reader = CountingReader(ref, self.session_cls(ref.locator))
+        self.opened.append(reader)
+        return reader
+
+
+def test_collector_reads_each_session_once_per_cycle_and_reuses_the_reader(tmp_path):
+    path = tmp_path / "one.jsonl"
+    path.write_text('{"value": 1}\n', encoding="utf-8")
+    provider = ReaderProvider("codex", tmp_path, paths=[path, path])
+    provider.session_cls = session_cls_for("codex")
+    collector = Collector([provider], Memory(tmp_path / "sessions.json"), hours=24, scan_procs=False)
+
+    runs = collector.collect()
+    assert [run.label for run in runs] == ["one"]
+    assert len(provider.opened) == 1  # a duplicated history row reuses the reader
+    assert provider.opened[0].updates == 1  # and is read once per cycle
+
+    collector.collect()
+    assert len(provider.opened) == 1  # the reader survives polls
+    assert provider.opened[0].updates == 2
+
+
+def test_collector_reports_provider_health_and_recovers(tmp_path):
+    ok_path = tmp_path / "ok.jsonl"
+    ok_path.write_text('{"value": 1}\n', encoding="utf-8")
+    degraded_path = tmp_path / "degraded.jsonl"
+    degraded_path.write_text('{"value": 1}\nnot json\n', encoding="utf-8")
+    unreadable_path = tmp_path / "unreadable.jsonl"
+    unreadable_path.mkdir()  # a directory raises OSError when read as a file
+    healthy = SwitchProvider("alpha", tmp_path, paths=[ok_path])
+    degraded = SwitchProvider("beta", tmp_path, paths=[degraded_path])
+    failing = SwitchProvider("gamma", tmp_path, fail={"history"})
+    offline = SwitchProvider("delta", tmp_path)
+    offline.available = lambda: False
+    broken = SwitchProvider("epsilon", tmp_path, paths=[unreadable_path])
+    for provider in (healthy, degraded, failing, broken):
+        provider.session_cls = RecordingSession
+    collector = Collector([healthy, degraded, failing, offline, broken],
+                          Memory(tmp_path / "sessions.json"), hours=24, scan_procs=False)
+
+    collector.collect()
+    health = collector.health
+    assert health["alpha"].state == "ok" and health["alpha"].readers == 1
+    assert (health["alpha"].records, health["alpha"].parsed, health["alpha"].discarded) == (1, 1, 0)
+    assert health["alpha"].details == () and isinstance(health["alpha"].last_good, float)
+    assert health["beta"].state == "degraded"
+    assert (health["beta"].records, health["beta"].parsed, health["beta"].discarded) == (2, 1, 1)
+    assert health["beta"].details == ("discarded",)
+    assert health["gamma"].state == "error" and health["gamma"].readers == 0
+    assert health["gamma"].details == () and health["gamma"].last_good is None
+    assert health["delta"].state == "unavailable"
+    assert health["delta"].details == () and health["delta"].last_good is None
+    assert health["epsilon"].state == "error" and health["epsilon"].details == ("read_error",)
+    assert health["epsilon"].last_good is None
+    assert str(tmp_path) not in repr(health)
+
+    failing.fail.clear()
+    collector.collect()
+    assert collector.health["gamma"].state == "ok"
+    assert collector.health["alpha"].state == "ok"
+
+
+def test_collector_rejects_a_provider_without_declared_capabilities(tmp_path):
+    undeclared = SwitchProvider("alpha", tmp_path)
+    undeclared.capabilities = {"processes": True}  # a dict is not a Capabilities declaration
+    with pytest.raises(TypeError, match="alpha: capabilities must be a Capabilities instance"):
+        Collector([SwitchProvider("beta", tmp_path), undeclared], Memory(), hours=24, scan_procs=False)
+
+
+def test_missing_reader_aggregates_detail_without_last_good(tmp_path):
+    missing = tmp_path / "never-written.jsonl"
+    provider = SwitchProvider("alpha", tmp_path, paths=[missing])
+    provider.session_cls = RecordingSession
+    collector = Collector([provider], Memory(tmp_path / "sessions.json"), hours=24, scan_procs=False)
+
+    collector.collect()
+    health = collector.health["alpha"]
+    assert health.state == "unavailable" and health.readers == 1
+    assert health.details == ("missing",) and health.last_good is None
+    assert str(tmp_path) not in repr(health)
+
+
+def test_worst_health_preserves_verified_and_defaults_to_ok():
+    from bitacora.collector import _worst_health
+
+    assert _worst_health([]) == "ok"  # a provider with no readers is not degraded
+    assert _worst_health(["verified", "verified"]) == "verified"
+    assert _worst_health(["verified", "degraded"]) == "degraded"
+    assert _worst_health(["error", "unavailable"]) == "error"
+
+
+class RowSession(Session):
+    provider = "rows"
+
+    def handle(self, obj):
+        pass
+
+
+class StaticReader:
+    def __init__(self, ref, session):
+        self.ref = ref
+        self._session = session
+
+    def update(self):
+        return False
+
+    def session(self):
+        return self._session
+
+    def checkpoint(self):
+        return {}
+
+    def health(self):
+        from bitacora.sources import ReaderHealth
+        return ReaderHealth("ok")
+
+
+class RowProvider(SwitchProvider):
+    """A non-file source: the collector must not assume paths or files."""
+
+    def __init__(self, name, home, ref):
+        super().__init__(name, home)
+        self.ref = ref
+
+    def discover(self, since):
+        return [self.ref]
+
+    def open(self, ref):
+        return StaticReader(ref, RowSession(Path("synthetic-store")))
+
+
+def test_collector_uses_the_ref_key_for_non_file_sources(tmp_path):
+    from bitacora.sources import SessionRef, ref_key
+    ref = SessionRef("rows", ref_key("rows", "row-1"), "row-1", kind="sqlite")
+    provider = RowProvider("rows", tmp_path, ref)
+    collector = Collector([provider], Memory(tmp_path / "sessions.json"), hours=24, scan_procs=False)
+
+    runs = collector.collect()
+    assert [run.key for run in runs] == [ref.key]
+    assert ("rows", "row-1") in collector.sessions
+
+
+class IdentifiedRowSession(RowSession):
+    def __init__(self, path):
+        super().__init__(path)
+        self.session_id = "row-session-1"
+
+
+class RefKeyRowProvider(RowProvider):
+    """A non-file source whose session carries an id: the ref key still owns the run key."""
+
+    def __init__(self, name, home, ref, procs_now=()):
+        super().__init__(name, home, ref)
+        self.procs_now = list(procs_now)
+
+    def open(self, ref):
+        return StaticReader(ref, IdentifiedRowSession(Path("synthetic-store")))
+
+    def match_ref(self, pi, claimed, peers=()):
+        return self.ref
+
+
+def test_non_file_run_keys_use_the_ref_key_for_history_and_live(tmp_path):
+    from bitacora.sources import SessionRef, ref_key
+    ref = SessionRef("rows", ref_key("rows", "row-42"), "row-42", kind="sqlite")
+
+    history = RefKeyRowProvider("rows", tmp_path, ref)
+    history_collector = Collector([history], Memory(tmp_path / "history.json"), hours=24, scan_procs=False)
+    history_runs = history_collector.collect()
+    assert history_runs[0].session.session_id == "row-session-1"
+    assert [run.key for run in history_runs] == [ref.key]
+
+    live = RefKeyRowProvider("rows", tmp_path, ref, procs_now=[
+        ProcInfo("rows", 5, time.time() - 30, ["rows"], log="row.log")])
+    live_collector = Collector([live], Memory(tmp_path / "live.json"), hours=24, scan_procs=False)
+    live_runs = live_collector.collect()
+    assert [run.key for run in live_runs] == [ref.key]
+    assert live_runs[0].key == history_runs[0].key
+    assert live_runs[0].proc is not None
+    assert live_collector.memory.session(ref.key)["label"] == live_runs[0].label
+
+
+def test_two_providers_sharing_a_locator_get_their_own_readers(tmp_path):
+    path = tmp_path / "shared.jsonl"
+    path.write_text('{"value": 1}\n', encoding="utf-8")
+    alpha = ReaderProvider("alpha", tmp_path, paths=[path])
+    beta = ReaderProvider("beta", tmp_path, paths=[path])
+    alpha.session_cls = session_cls_for("alpha")
+    beta.session_cls = session_cls_for("beta")
+    collector = Collector([alpha, beta], Memory(tmp_path / "sessions.json"), hours=24, scan_procs=False)
+
+    runs = collector.collect()
+    assert {run.provider for run in runs} == {"alpha", "beta"}
+    assert len(alpha.opened) == len(beta.opened) == 1
+    assert alpha.opened[0] is not beta.opened[0]
+    assert alpha.opened[0].updates == beta.opened[0].updates == 1
+    assert len(collector.sessions) == len(collector.readers) == 2
+
+    collector.collect()
+    assert alpha.opened[0].updates == beta.opened[0].updates == 2
+    assert len(collector.sessions) == 2
+
+
+def test_file_run_keys_keep_the_historical_shape(tmp_path):
+    class IdentifiedSession(RecordingSession):
+        def __init__(self, path):
+            super().__init__(path)
+            self.session_id = "session-9"
+
+    identified = tmp_path / "identified.jsonl"
+    identified.write_text('{"value": 1}\n', encoding="utf-8")
+    anonymous = tmp_path / "anonymous.jsonl"
+    anonymous.write_text('{"value": 1}\n', encoding="utf-8")
+    with_id = SwitchProvider("codex", tmp_path, paths=[identified])
+    with_id.session_cls = IdentifiedSession
+    without_id = SwitchProvider("claude", tmp_path, paths=[anonymous])
+    without_id.session_cls = RecordingSession
+    collector = Collector([with_id, without_id], Memory(tmp_path / "sessions.json"), hours=24, scan_procs=False)
+
+    assert {run.key for run in collector.collect()} == {"codex:session-9", f"claude:{anonymous}"}
+
+
+def test_anonymous_file_sessions_keep_separate_live_and_history_keys(tmp_path):
+    """Pin the documented historical shape: an anonymous file session does not share one key between live and
+    history until a persisted-key migration exists, and a locator claimed by a live process is never repeated."""
+    pid = 42
+
+    # Same file: the live match claims the locator, so history does not repeat it under a second key.
+    path = tmp_path / "anonymous.jsonl"
+    path.write_text('{"value": 1}\n', encoding="utf-8")
+    same = SwitchProvider("codex", tmp_path, paths=[path],
+                          procs_now=[ProcInfo("codex", pid, time.time() - 30, ["codex"])])
+    same.session_cls = RecordingSession
+    same.match_path = path
+    runs = Collector([same], Memory(tmp_path / "same.json"), hours=24, scan_procs=False).collect()
+    assert [(run.key, run.live) for run in runs] == [(f"codex:pid{pid}", True)]
+
+    # Different files: live keeps the pid key and history the locator key.
+    live_path = tmp_path / "live.jsonl"
+    live_path.write_text('{"value": 2}\n', encoding="utf-8")
+    history_path = tmp_path / "history.jsonl"
+    history_path.write_text('{"value": 3}\n', encoding="utf-8")
+    split = SwitchProvider("codex", tmp_path, paths=[history_path],
+                           procs_now=[ProcInfo("codex", pid, time.time() - 30, ["codex"])])
+    split.session_cls = RecordingSession
+    split.match_path = live_path
+    runs = Collector([split], Memory(tmp_path / "split.json"), hours=24, scan_procs=False).collect()
+    assert [(run.key, run.live) for run in runs] == [(f"codex:pid{pid}", True),
+                                                     (f"codex:{history_path}", False)]
+
+
+def test_a_deleted_session_file_does_not_hide_skipped_records(tmp_path):
+    degraded_path = tmp_path / "degraded.jsonl"
+    degraded_path.write_text('{"value": 1}\nnot json\n', encoding="utf-8")
+    gone_path = tmp_path / "gone.jsonl"
+    gone_path.write_text('{"value": 1}\n', encoding="utf-8")
+    provider = SwitchProvider("beta", tmp_path, paths=[degraded_path, gone_path])
+    provider.session_cls = RecordingSession
+    collector = Collector([provider], Memory(tmp_path / "sessions.json"), hours=24, scan_procs=False)
+    collector.collect()
+    gone_path.unlink()
+    health = collector._provider_health(set(), {})
+    assert health["beta"].state == "degraded" and health["beta"].discarded == 1

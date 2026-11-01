@@ -6,7 +6,7 @@ from pathlib import Path
 from rich.table import Table
 from rich.text import Text
 
-from bitacora.i18n import t
+from bitacora.i18n import S, t
 from bitacora.model import Event, Run, Session
 from bitacora.themes import TEXT_CONTRAST, contrast, mix
 from bitacora.util import first_line, fmt_ago, fmt_dur, hhmm
@@ -22,7 +22,8 @@ THEME_VARS = {"background": "#272822", "foreground": "#d6d6d6", "success": "#a5e
 DARK = True
 BG = FG = DIM = GREEN = RED = YELLOW = CYAN = BLUE = PURPLE = VIOLET = ""
 STATUS_STYLE: dict[str, str] = {}
-AGENT_STYLE: dict[str, str] = {}
+ACCENT_STYLE: dict[str, str] = {}
+ORIGIN_KINDS = {"terminal", "background", "desktop", "ide", "subagent", "other"}
 
 
 def readable(c: str, bg: str, fg: str) -> str:
@@ -35,7 +36,7 @@ def readable(c: str, bg: str, fg: str) -> str:
 
 
 def apply_theme(variables: dict[str, str] | None = None) -> None:
-    global DARK, BG, FG, DIM, GREEN, RED, YELLOW, CYAN, BLUE, PURPLE, VIOLET, STATUS_STYLE, AGENT_STYLE
+    global DARK, BG, FG, DIM, GREEN, RED, YELLOW, CYAN, BLUE, PURPLE, VIOLET, STATUS_STYLE, ACCENT_STYLE
     v = dict(THEME_VARS)
     for k, val in (variables or {}).items():
         if k in v and isinstance(val, str) and val.startswith("#") and len(val) == 7:
@@ -55,8 +56,7 @@ def apply_theme(variables: dict[str, str] | None = None) -> None:
     STATUS_STYLE = {"asking": f"bold {YELLOW}", "starting": CYAN, "running": f"bold {GREEN}",
                     "your_turn": BLUE, "done": GREEN, "failed": RED, "limited": limited, "stopped": stopped,
                     "quiet": quiet, "unknown": DIM}
-    AGENT_STYLE = {"codex": CYAN, "claude": v["accent"]}
-
+    ACCENT_STYLE = {"secondary": CYAN, "accent": v["accent"], "primary": PURPLE}
 
 apply_theme()
 
@@ -65,35 +65,26 @@ def status_text(run: Run) -> Text:
     return Text(t(f"st_{run.status}"), style=STATUS_STYLE.get(run.status, DIM))
 
 
-def _agent_parts(run: Run) -> tuple[str, str, str]:
-    provider = str(run.provider).lower().replace("_", "-")
-    if provider in ("claude", "claude-code"):
-        provider_key = "claude"
-        style = AGENT_STYLE.get("claude", "")
-    elif provider == "codex":
-        provider_key = "codex"
-        style = AGENT_STYLE.get("codex", "")
-    else:
-        provider_key = "other"
-        style = AGENT_STYLE.get(run.provider, "")
-    session = run.session
-    kind = getattr(session, "origin_kind", getattr(run, "origin_kind", "other"))
-    if kind == "other" and session:
-        if provider in ("claude", "claude-code"):
-            from bitacora.providers.claude import origin_kind_for_raw
-            kind = origin_kind_for_raw(getattr(session, "origin", None))
-        elif provider == "codex":
-            from bitacora.providers.codex import origin_kind_for_raw
-            kind = origin_kind_for_raw(getattr(session, "origin", None))
-    kind = kind if kind in {"terminal", "background", "desktop", "ide", "subagent", "other"} else "other"
-    return provider_key, kind, style
+def _agent_parts(run: Run) -> tuple[str, str, str, str]:
+    meta = getattr(run, "meta", None)
+    meta = meta if isinstance(meta, dict) else {}
+    full_key = meta.get("label_key")
+    short_key = meta.get("short_label_key")
+    fallback = meta.get("label") or str(run.provider)
+    full = t(full_key) if isinstance(full_key, str) and full_key else fallback
+    short = t(short_key) if isinstance(short_key, str) and short_key else fallback
+    accent = meta.get("accent")
+    style = ACCENT_STYLE.get(accent, "") if isinstance(accent, str) else ""
+    kind = run.origin_kind
+    if kind not in ORIGIN_KINDS:
+        kind = "other"
+    return full, short, kind, style
 
 
 def agent_text(run: Run) -> Text:
     """The full provider and origin label used in the hero and Details."""
-    provider_key, kind, style = _agent_parts(run)
-    provider_label = t(f"provider_{provider_key}") if provider_key in ("claude", "codex") else str(run.provider)
-    tx = Text(provider_label, style=style)
+    full, _, kind, style = _agent_parts(run)
+    tx = Text(full, style=style)
     tx.append(" · ", style=DIM)
     tx.append(t(f"origin_{kind}"))
     return tx
@@ -101,12 +92,8 @@ def agent_text(run: Run) -> Text:
 
 def agent_table_text(run: Run) -> Text:
     """The compact provider and origin label shown in the run table."""
-    provider_key, kind, style = _agent_parts(run)
-    provider_label = (
-        t(f"provider_{provider_key}_short") if provider_key in ("claude", "codex")
-        else str(run.provider)
-    )
-    tx = Text(provider_label, style=style)
+    _, short, kind, style = _agent_parts(run)
+    tx = Text(short, style=style)
     tx.append(" · ", style=DIM)
     tx.append(t(f"origin_short_{kind}"))
     return tx
@@ -227,7 +214,8 @@ def render_event(ev: Event, verbose: bool, think: Event | None = None) -> Table:
         if verbose and ev.detail:
             body.append(indent_block(ev.detail, RED, "│ ", 14, tail=True))
     elif k == "note":
-        body.append(f"· {ev.text}", style=DIM)
+        text = t("ev_note_" + ev.sub) if ev.sub and "ev_note_" + ev.sub in S else ev.text
+        body.append(f"· {text}", style=DIM)
     else:
         body.append("ƒ ", style=YELLOW)
         body.append(ev.text, style=YELLOW)

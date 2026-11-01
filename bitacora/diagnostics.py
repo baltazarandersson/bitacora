@@ -14,8 +14,12 @@ import psutil
 from bitacora import __version__, desktop, model, procs, worker
 from bitacora.collector import Collector
 from bitacora.providers import all_providers
-from bitacora.providers.base import Provider
-from bitacora.store import Memory
+from bitacora.providers.base import Provider, Support
+from bitacora.sources import ProviderHealth
+from bitacora.store import Memory, load_config
+
+SUPPORT_FIELDS = ("resume", "messages", "commands", "files", "questions", "usage", "context", "quota",
+                  "titles", "subagents")
 
 
 def _percentile(values: list[float], fraction: float) -> float | None:
@@ -46,6 +50,21 @@ def _process_prefixes(providers: Iterable[Provider]) -> tuple[str, ...]:
                          for name in provider.process_names}))
 
 
+def _capabilities(capabilities) -> dict:
+    """Support values as plain strings: no enums and no provider objects cross the JSON boundary."""
+    out = {"processes": bool(capabilities.processes), "history": bool(capabilities.history)}
+    for name in SUPPORT_FIELDS:
+        out[name] = Support(getattr(capabilities, name)).value
+    return out
+
+
+def _health_summary(health: dict[str, ProviderHealth]) -> dict:
+    return {name: {"state": item.state, "readers": item.readers, "records": item.records,
+                   "parsed": item.parsed, "discarded": item.discarded, "unknown": item.unknown,
+                   "details": list(item.details), "last_good": item.last_good}
+            for name, item in sorted(health.items())}
+
+
 def collect(passes: int = 3, hours: float = 24, memory: bool = False) -> dict:
     """Scan the real collector a few times and describe the work without exporting session data.
 
@@ -54,7 +73,8 @@ def collect(passes: int = 3, hours: float = 24, memory: bool = False) -> dict:
     exception class and record size), never record content, paths or exception messages.
     """
     passes = max(1, min(int(passes or 1), 10))
-    providers = all_providers()
+    providers = all_providers(enabled=load_config().providers)
+    disabled = sorted({provider.name for provider in all_providers()} - {provider.name for provider in providers})
     scans: list[float] = []
     runs = []
     with tempfile.TemporaryDirectory(prefix="bitacora-diagnostics-") as tmp:
@@ -84,13 +104,12 @@ def collect(passes: int = 3, hours: float = 24, memory: bool = False) -> dict:
         "passes": passes,
         "providers": [
             {"name": provider.name, "available": provider.available(),
-             "capabilities": {"processes": provider.capabilities.processes,
-                              "history": provider.capabilities.history,
-                              "resume": provider.capabilities.resume,
-                              "quota": provider.capabilities.quota,
-                              "titles": provider.capabilities.titles}}
+             "capabilities": _capabilities(provider.capabilities),
+             "tier": provider.tier, "verified_versions": list(provider.verified_versions)}
             for provider in providers
         ],
+        "disabled": disabled,
+        "health": _health_summary(collector.health),
         "process": {"pid": process.pid, "rss_mb": round(process.memory_info().rss / 1048576, 1),
                     "cpu_percent": round(process.cpu_percent(interval=0.1), 1)},
         "processes": {"prefixes": list(prefixes), "visible": len(visible),

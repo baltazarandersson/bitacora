@@ -17,7 +17,7 @@ import psutil
 from bitacora import __version__, i18n, procs
 from bitacora.i18n import t
 from bitacora.launcher import clean_env
-from bitacora.model import Run
+from bitacora.model import ACCESS_KINDS, Run
 from bitacora.runtime import Runtime
 from bitacora.sorting import DESKTOP_SORT_COLUMNS, sort_runs
 from bitacora.store import capped_hours
@@ -40,57 +40,9 @@ def _context_tokens(session):
     return number(getattr(session, "ctx_used", None)) if session else None
 
 
-def _usage_basis(session, provider):
-    basis = getattr(session, "usage_basis", None)
-    if basis not in ("processed", "reported"):
-        basis = "processed" if str(provider).lower().startswith("claude") else "reported"
-    return basis
-
-
 def _localized_kind(value, allowed, prefix):
     kind = value if value in allowed else "other"
     return t(f"{prefix}_{kind.replace('-', '_')}")
-
-
-def _context_window(run, session):
-    window = number(getattr(session, "ctx_window", None)) if session else None
-    if window is not None and window <= 0:
-        window = None
-    assumed = None
-    if run.provider == "claude":
-        from bitacora.providers.claude import context_window_for_model
-        assumed = number(context_window_for_model(run.model))
-        if assumed:
-            window = assumed
-    return window, assumed is not None
-
-
-def _origin_kind(run, session):
-    if session is None:
-        return getattr(run, "origin_kind", "other")
-    if run.provider == "claude":
-        from bitacora.providers.claude import origin_kind_for_raw
-    else:
-        from bitacora.providers.codex import origin_kind_for_raw
-    return origin_kind_for_raw(getattr(session, "origin", None))
-
-
-def _effort_source(run, session):
-    if run.provider == "codex" and session and getattr(session, "effort", None):
-        return "transcript"
-    if run.proc and getattr(run.proc, "effort", None):
-        return "launch"
-    if session and getattr(session, "effort", None):
-        return "transcript"
-    return "unknown"
-
-
-def _access_kind(run, session):
-    from bitacora.util import access_kind
-
-    raw = getattr(session, "sandbox", None) if session else None
-    raw = raw or getattr(run, "sandbox", None)
-    return access_kind(raw, run.provider) or "other"
 
 
 class DesktopService:
@@ -265,8 +217,34 @@ class DesktopService:
         except OSError:
             return False
 
+    def _provider_label(self, name):
+        prov = next((p for p in self._runtime.providers if p.name == name), None)
+        if prov is None:
+            return str(name)
+        return t(prov.label_key) if prov.label_key else (prov.label or str(name))
+
+    def _degraded_readers(self):
+        return [{"provider": name, "label": self._provider_label(name), "discarded": health.get("discarded", 0)}
+                for name, health in sorted(self._source.provider_health.items()) if health.get("state") == "degraded"]
+
+    def _source_state(self, run):
+        """How the run's provider is being read. Unavailable providers stay silent."""
+        health = self._source.provider_health.get(run.provider)
+        state = health.get("state") if health else None
+        if state in ("ok", "verified"):
+            return t("source_state_ok")
+        if state == "degraded":
+            text = t("source_state_degraded", discarded=f"{health['discarded']:,}")
+            if health.get("unknown", 0) > 0:
+                text += " · " + t("source_unknown", unknown=f"{health['unknown']:,}")
+            return text
+        if state == "error":
+            return t("source_state_error")
+        return None
+
     def _can_stop(self, run):
-        if self._closed or self._source.health not in ("ready", "partial") or not run.proc or not run.session:
+        if (self._closed or self._source.health not in ("ready", "partial", "degraded") or not run.proc
+                or not run.session):
             return False
         if run.proc.session_id and run.session.session_id:
             return run.proc.session_id == run.session.session_id
@@ -277,21 +255,22 @@ class DesktopService:
 
         s = run.session
         ctx_used = _context_tokens(s)
-        ctx_window, context_window_assumed = _context_window(run, s)
+        ctx_window = run.context_window
+        context_window_assumed = run.context_window_assumed
         if ctx_window:
             context = f"{100 * (ctx_used / ctx_window):.0f}%" if ctx_used is not None else t("quota_value_unknown")
         else:
             context = ("0" if ctx_used == 0 else fmt_tokens(ctx_used)) if ctx_used is not None else "-"
-        basis = _usage_basis(s, run.provider)
+        basis = run.usage_basis
         origin_raw = getattr(s, "origin", getattr(run, "origin", "?")) if s else getattr(run, "origin", "?")
-        origin_kind = _origin_kind(run, s)
+        origin_kind = run.origin_kind
         if origin_kind not in ("terminal", "background", "desktop", "ide", "subagent", "other"):
             origin_kind = "other"
-        effort_source = _effort_source(run, s)
+        effort_source = run.effort_source
         if effort_source not in ("transcript", "launch", "unknown"):
             effort_source = "unknown"
-        access_kind = _access_kind(run, s)
-        if access_kind not in ("read-only", "workspace-write", "prompt", "auto-edit", "plan", "full-access", "other"):
+        access_kind = run.access_kind or "other"
+        if access_kind not in ACCESS_KINDS:
             access_kind = "other"
         return {"key": run.key, "provider": run.provider, "agent": agent_table_text(run).plain,
                 "agent_full": agent_text(run).plain,
@@ -343,7 +322,8 @@ class DesktopService:
             return {"revision": self._revision,
                     "reader": {"state": "error" if self._closed else self._source.health,
                                "error": t("desktop_reader_closed") if self._closed else self._source.error,
-                               "age": age, "errors": errors},
+                               "age": age, "errors": errors,
+                               "degraded": [] if self._closed else self._degraded_readers()},
                     "runs": [self._summary(r) for r in runs], "counts": totals,
                     "quotas": self._source.mirror.quotas, "notices": notices}
 
@@ -382,9 +362,10 @@ class DesktopService:
             if run is None:
                 return {"error": t("desktop_detail_missing")}
             s = run.session
-            basis = _usage_basis(s, run.provider)
+            basis = run.usage_basis
             ctx_used = _context_tokens(s)
-            ctx_window, context_window_assumed = _context_window(run, s)
+            ctx_window = run.context_window
+            context_window_assumed = run.context_window_assumed
             if ctx_window:
                 context = f"{ctx_used:,} / {ctx_window:,}" if ctx_used is not None else \
                     f"{t('quota_value_unknown')} / {ctx_window:,}"
@@ -392,12 +373,12 @@ class DesktopService:
                 context = ("0" if ctx_used == 0 else f"{ctx_used:,}") if s and ctx_used is not None else "-"
             if s and context_window_assumed:
                 context += " · " + t("context_window_assumed")
-            effort_source = _effort_source(run, s)
+            effort_source = run.effort_source
             if effort_source not in ("transcript", "launch", "unknown"):
                 effort_source = "unknown"
             access_kind = _localized_kind(
-                _access_kind(run, s),
-                ("read-only", "workspace-write", "prompt", "auto-edit", "plan", "full-access", "other"),
+                run.access_kind or "other",
+                ACCESS_KINDS,
                 "access",
             )
             origin_raw = getattr(s, "origin", getattr(run, "origin", "-")) if s else getattr(run, "origin", "-")
@@ -407,6 +388,13 @@ class DesktopService:
                 t(f"status_source_{status_source}")
                 if status_source in ("process", "transcript") else "-"
             )
+            source_state = self._source_state(run)
+            if run.proc:
+                pid_text = str(run.proc.pid)
+            elif run.meta.get("processes") is False:  # its runs never own a process; a shared service may be running
+                pid_text = t("inf_pid_shared_service") if run.meta.get("service") is True else t("inf_pid_no_process")
+            else:
+                pid_text = t("not_running")
             fields = [("inf_status", t("st_" + run.status)), ("inf_status_source", status_source_text),
                       ("inf_agent", agent_text(run).plain),
                       ("inf_origin_raw", origin_raw or "-"),
@@ -421,12 +409,17 @@ class DesktopService:
                       ("inf_tokens_basis", t(f"usage_{basis}_basis")),
                       ("inf_context", context),
                       ("inf_result", self._path(run.out) or "-"), ("inf_log", self._path(run.log) or "-"),
-                      ("inf_file", self._path(s.path) if s else "-"),
-                      ("inf_pid", str(run.proc.pid) if run.proc else t("not_running")),
+                      ("inf_file", self._path(s.path) if s and s.path else "-"),
+                      ("inf_pid", pid_text),
                       ("inf_command", " ".join(run.proc.cmdline[1:]) if run.proc else "-"),
                       ("inf_resume", self._resume(run) or "-")]
             if s and s.open_questions:
                 fields.insert(1, ("inf_question", " | ".join(s.open_questions.values())))
+            if source_state:
+                # A readable source sits with the file details; a problem goes near the top, where it is seen.
+                healthy = self._source.provider_health.get(run.provider, {}).get("state") in ("ok", "verified")
+                at = [k for k, _ in fields].index("inf_file") + 1 if healthy else 1
+                fields.insert(at, ("inf_source", source_state))
             counts = self._aspect.setdefault(run.key, dict.fromkeys(ASPECTS, 0))
             sigs = self._aspect_sig.setdefault(run.key, {})
             result_sig = self._stat_sig(run.out)
@@ -440,7 +433,8 @@ class DesktopService:
             info_sig = (run.status, s.gen if s else None, s.tokens if s else None, ctx_used,
                         run.model, run.effort, run.sandbox, s.events_total if s else 0,
                         tuple(s.open_questions.items()) if s else (),
-                        run.proc.pid if run.proc else None, run.cwd, run.out, run.log,
+                        run.proc.pid if run.proc else None, run.meta.get("service"), run.cwd, run.out, run.log,
+                        source_state,
                         int(time.time() // 4) if run.live else 0)
             if sigs.get("info") != info_sig:
                 sigs["info"] = info_sig
