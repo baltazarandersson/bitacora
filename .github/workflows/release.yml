@@ -72,8 +72,8 @@ jobs:
                       break
               time.sleep(0.25)
           assert result.get("cleanup") == "complete" and result.get("ok") and result.get("functional_ok"), result
-          assert result.get("runs") == 16, result
-          assert result["dom"]["rows"] == 16 and result["reader"] == "ready", result
+          assert result.get("runs") == 19, result
+          assert result["dom"]["rows"] == 19 and result["reader"] == "ready", result
       - uses: actions/upload-artifact@v7
         with:
           name: exe
